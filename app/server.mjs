@@ -1,9 +1,10 @@
+import "dotenv/config";
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fs from "fs";
 import path from "path";
-import https from "https";
 import { fileURLToPath } from "url";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, "dist");
@@ -22,141 +23,31 @@ const SCOPE = process.env.OAUTH_SCOPE || "read write";
 
 const oauthEnabled = Boolean(CLIENT_ID && CLIENT_SECRET);
 
-// --- LLM (Calypso internal cluster) integration -----------------------------------
+// --- LLM (Google Gemini) integration -----------------------------------
 // Self-contained in this file on purpose: the production Docker build only copies
 // server.mjs (not the rest of app/) into the runtime image, so this cannot live in a
-// separate module. See docker/node20.11/Dockerfile - not modified for this feature.
-// No API key is used or needed - Calypso access is controlled by network location
-// (VPC-only), per docs/XYZCalypso.md.
-const CALYPSO_BASE_URL =
-  process.env.CALYPSO_BASE_URL || "https://apps.services.calypso.intra.chrysler.com";
-const DEFAULT_CALYPSO_MODEL_CANDIDATES = [
-  { app: "vllm-glm-52", model: "cyankiwi/GLM-5.2-AWQ-INT4" },
-  { app: "vllm-qwen36-35b-a3b", model: "Qwen/Qwen3.6-35B-A3B" },
-  { app: "vllm-gpt-oss-120b", model: "openai/gpt-oss-120b" },
-];
-
-function parseModelCandidates(raw) {
-  if (!raw) return DEFAULT_CALYPSO_MODEL_CANDIDATES;
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.every((c) => c && c.app && c.model)) return parsed;
-  } catch {
-    // fall through to default below
-  }
-  return DEFAULT_CALYPSO_MODEL_CANDIDATES;
-}
-const CALYPSO_MODEL_CANDIDATES = parseModelCandidates(process.env.CALYPSO_MODEL_CANDIDATES);
-const CALYPSO_CHAT_TIMEOUT_MS = Number(process.env.CALYPSO_CHAT_TIMEOUT_MS || 90000);
-// The response_format (structured-output) attempt has been observed to hang for the full chat
-// timeout or return an empty completion on larger prompts (e.g. once clarifications are included)
-// - fail it fast and fall through to the plain-JSON retry (CALYPSO_CHAT_TIMEOUT_MS) instead of
-// wasting up to 90s on a call that a real, reproducible test showed is unreliable at that size.
-const CALYPSO_STRUCTURED_ATTEMPT_TIMEOUT_MS = Number(
-  process.env.CALYPSO_STRUCTURED_ATTEMPT_TIMEOUT_MS || 20000,
+// separate module. SYNC: keep in sync with vite.config.ts createLlmDevPlugin.
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const GEMINI_PDF_MODEL = process.env.GEMINI_PDF_MODEL || GEMINI_MODEL;
+const GEMINI_CHAT_TIMEOUT_MS = Number(process.env.GEMINI_CHAT_TIMEOUT_MS || 90000);
+const GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS = Number(
+  process.env.GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS || 20000,
 );
-// Caps callCalypso's whole candidate loop, not just one attempt - a single candidate's own two
-// attempts can already take close to this long, so this mainly prevents cascading through
-// multiple simultaneously-ONLINE candidates from taking several minutes in total.
-const CALYPSO_TOTAL_TIMEOUT_MS = Number(process.env.CALYPSO_TOTAL_TIMEOUT_MS || 115000);
-const CALYPSO_STATE_TIMEOUT_MS = Number(process.env.CALYPSO_STATE_TIMEOUT_MS || 10000);
-// Gap analysis only ever returns up to 5 short questions, but was observed live (via the
-// finish_reason/usage diagnostics above) hitting this exact cap with EMPTY content on some
-// candidates (e.g. vllm-qwen36-35b-a3b) before ever producing valid JSON - some models spend a
-// meaningful number of completion tokens before/while satisfying the strict schema, so 1024 was
-// too tight. Generate returns every requested document's full section text in one JSON object,
-// so it needs a much larger ceiling to avoid truncating valid output mid-JSON.
-const CALYPSO_GAP_ANALYSIS_MAX_TOKENS = Number(process.env.CALYPSO_GAP_ANALYSIS_MAX_TOKENS || 4096);
-const CALYPSO_GENERATE_MAX_TOKENS = Number(process.env.CALYPSO_GENERATE_MAX_TOKENS || 8192);
-const CALYPSO_TEMPLATE_EXTRACT_MAX_TOKENS = Number(process.env.CALYPSO_TEMPLATE_EXTRACT_MAX_TOKENS || 4096);
-// docs/Enhancements4.md §4.3: per-document cap enforced by /_api/context-extract. The combined
-// 12,000-char cap across up to 3 documents is inherently a caller/batch concern (this endpoint
-// only ever sees one document per request) and is left to the client-side upload flow (§5).
+const GEMINI_GAP_ANALYSIS_MAX_TOKENS = Number(process.env.GEMINI_GAP_ANALYSIS_MAX_TOKENS || 4096);
+const GEMINI_GENERATE_MAX_TOKENS = Number(process.env.GEMINI_GENERATE_MAX_TOKENS || 8192);
+const GEMINI_TEMPLATE_EXTRACT_MAX_TOKENS = Number(
+  process.env.GEMINI_TEMPLATE_EXTRACT_MAX_TOKENS || 4096,
+);
+// docs/Enhancements4.md §4.3: per-document cap enforced by /_api/context-extract.
 const CONTEXT_EXTRACT_CHAR_LIMIT = Number(process.env.CONTEXT_EXTRACT_CHAR_LIMIT || 8000);
-// docs/Enhancements4.md §4.1 Phase 3 (.pdf/scanned documents, no dedicated OCR schema needed -
-// the extracted text is typically longer than a template's section list).
-const CALYPSO_PDF_EXTRACT_MAX_TOKENS = Number(process.env.CALYPSO_PDF_EXTRACT_MAX_TOKENS || 8192);
+const GEMINI_PDF_EXTRACT_MAX_TOKENS = Number(process.env.GEMINI_PDF_EXTRACT_MAX_TOKENS || 8192);
 
-class LlmUnavailableError extends Error { }
+class LlmUnavailableError extends Error {}
 
-// Calypso's certificate is self-signed (internal-only host, per docs/XYZCalypso.md's own
-// verify=False guidance). Scope the bypass to this dedicated agent/host only - never disable
-// TLS validation process-wide (that would silently weaken every other outbound HTTPS call).
-const calypsoAgent = new https.Agent({ rejectUnauthorized: false });
-
-/** Minimal promisified https request, used only for the Calypso internal LLM cluster. */
-function calypsoRequest(urlPath, { method = "GET", body, timeoutMs = CALYPSO_STATE_TIMEOUT_MS } = {}) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(urlPath, CALYPSO_BASE_URL);
-    const payload = body ? JSON.stringify(body) : undefined;
-    const req = https.request(
-      url,
-      {
-        method,
-        agent: calypsoAgent,
-        headers: payload
-          ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
-          : undefined,
-      },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          clearTimeout(deadline);
-          resolve({ status: res.statusCode || 0, raw: Buffer.concat(chunks).toString("utf-8") });
-        });
-      },
-    );
-    // A hard deadline, not an inactivity timer: req.setTimeout only fires after a period with no
-    // socket activity, so a response that trickles in via periodic keep-alive bytes while the
-    // model is still generating can silently defeat it and hang far past timeoutMs (observed live
-    // during debugging - a request outlived its own 90s timeout by several minutes). This fires
-    // unconditionally once timeoutMs elapses, regardless of any intervening activity.
-    const deadline = setTimeout(() => {
-      req.destroy(new Error(`Calypso request timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    req.on("error", (err) => {
-      clearTimeout(deadline);
-      reject(err);
-    });
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
-
-/** Best-effort - never throws. Returns "UNKNOWN" on any failure. */
-async function getAppState(appName) {
-  try {
-    const { status, raw } = await calypsoRequest(
-      `/cmd/state?application=${encodeURIComponent(appName)}`,
-      { timeoutMs: CALYPSO_STATE_TIMEOUT_MS },
-    );
-    if (status < 200 || status >= 300) return "UNKNOWN";
-    const trimmed = raw.trim();
-    try {
-      // Calypso's /cmd/state returns a JSON-encoded string (e.g. `"ONLINE"`), not bare text.
-      const parsed = JSON.parse(trimmed);
-      if (typeof parsed === "string") return parsed;
-    } catch {
-      // Not JSON-encoded - fall back to using the raw trimmed text as-is.
-    }
-    return trimmed || "UNKNOWN";
-  } catch (err) {
-    log("calypso", `getAppState(${appName}) failed: ${err.message}`);
-    return "UNKNOWN";
-  }
-}
-
-/** Fire-and-forget - resolves regardless of outcome, never blocks the caller. */
-async function triggerStart(appName) {
-  try {
-    await calypsoRequest(`/cmd/start?application=${encodeURIComponent(appName)}`, {
-      timeoutMs: CALYPSO_STATE_TIMEOUT_MS,
-    });
-    log("calypso", `Start requested for ${appName}`);
-  } catch (err) {
-    log("calypso", `triggerStart(${appName}) failed: ${err.message}`);
-  }
+function getGeminiClient() {
+  if (!GEMINI_API_KEY) throw new LlmUnavailableError("GEMINI_API_KEY not set");
+  return new GoogleGenerativeAI(GEMINI_API_KEY);
 }
 
 function extractJsonBlock(text) {
@@ -167,121 +58,116 @@ function extractJsonBlock(text) {
   return JSON.parse(stripped.slice(start, end + 1));
 }
 
-/** Calls one Calypso app's OpenAI-compatible chat-completions endpoint. Tries structured
- * response_format first (unconfirmed whether this vLLM deployment supports it); on failure,
- * retries once with a plain-JSON instruction and defensive text parsing. */
-async function callCalypsoChat(
-  appName,
-  modelId,
-  messages,
-  { responseFormat, maxTokens = 4096, temperature } = {},
-) {
+function openAiSchemaToGemini(responseFormat) {
+  if (!responseFormat) return undefined;
+  return responseFormat.json_schema?.schema ?? responseFormat;
+}
+
+function convertContentToParts(content) {
+  if (typeof content === "string") return [{ text: content }];
+  if (Array.isArray(content)) {
+    return content.map((block) => {
+      if (block.type === "text" && block.text) return { text: block.text };
+      if (block.type === "image_url" && block.image_url?.url) {
+        const match = block.image_url.url.match(/^data:([^;]+);base64,(.+)$/);
+        if (match) return { inlineData: { mimeType: match[1], data: match[2] } };
+      }
+      return { text: JSON.stringify(block) };
+    });
+  }
+  return [{ text: String(content) }];
+}
+
+function messagesToGemini(messages) {
+  const systemInstruction = messages
+    .filter((m) => m.role === "system")
+    .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
+    .join("\n\n");
+  const contents = messages
+    .filter((m) => m.role !== "system")
+    .map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: convertContentToParts(m.content),
+    }));
+  return { systemInstruction: systemInstruction || undefined, contents };
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  return Promise.race([
+    promise,
+    new Promise((_resolve, reject) => {
+      setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+    }),
+  ]);
+}
+
+/** Calls Gemini generateContent. Tries JSON-schema mode first; on failure, retries with the
+ * schema embedded in the user message and defensive text parsing. */
+async function callGemini(messages, responseFormat, maxTokens, temperature, modelId = GEMINI_MODEL) {
+  const { systemInstruction, contents } = messagesToGemini(messages);
   const attempts = responseFormat ? [{ withSchema: true }, { withSchema: false }] : [{ withSchema: false }];
   let lastError;
+  const genAI = getGeminiClient();
+
   for (const attempt of attempts) {
     try {
-      const body = { model: modelId, messages, max_tokens: maxTokens };
-      if (temperature !== undefined) body.temperature = temperature;
-      if (attempt.withSchema) {
-        body.response_format = responseFormat;
-      } else if (responseFormat) {
-        const schema = responseFormat.json_schema?.schema ?? responseFormat;
-        // "user" role, not "system" - some deployments (confirmed live: vllm-qwen36-35b-a3b)
-        // reject a second system message with "System message must be at the beginning".
-        body.messages = [
-          ...messages,
-          {
-            role: "user",
-            content:
-              "The following is a JSON Schema describing the required output shape - it is NOT " +
-              "the output itself. Respond with ONLY a single JSON object that satisfies this " +
-              "schema (real data filled in, no markdown code fences, no commentary, and never " +
-              "the schema itself): " + JSON.stringify(schema),
-          },
-        ];
+      const generationConfig = { maxOutputTokens: maxTokens };
+      if (temperature !== undefined) generationConfig.temperature = temperature;
+
+      let requestContents = contents;
+      if (attempt.withSchema && responseFormat) {
+        generationConfig.responseMimeType = "application/json";
+        generationConfig.responseSchema = openAiSchemaToGemini(responseFormat);
+      } else if (!attempt.withSchema && responseFormat) {
+        const schema = openAiSchemaToGemini(responseFormat);
+        const schemaPrompt =
+          "The following is a JSON Schema describing the required output shape - it is NOT " +
+          "the output itself. Respond with ONLY a single JSON object that satisfies this " +
+          "schema (real data filled in, no markdown code fences, no commentary, and never " +
+          "the schema itself): " + JSON.stringify(schema);
+        if (requestContents.length === 0) {
+          requestContents = [{ role: "user", parts: [{ text: schemaPrompt }] }];
+        } else {
+          const last = requestContents[requestContents.length - 1];
+          requestContents = [
+            ...requestContents.slice(0, -1),
+            { ...last, parts: [...last.parts, { text: schemaPrompt }] },
+          ];
+        }
       }
-      const { status, raw } = await calypsoRequest(`/${appName}/v1/chat/completions`, {
-        method: "POST",
-        body,
-        timeoutMs: attempt.withSchema ? CALYPSO_STRUCTURED_ATTEMPT_TIMEOUT_MS : CALYPSO_CHAT_TIMEOUT_MS,
+
+      const model = genAI.getGenerativeModel({
+        model: modelId,
+        systemInstruction,
+        generationConfig,
       });
-      if (status < 200 || status >= 300) {
-        // Flag responses that look like a token/context-limit rejection distinctly, rather than
-        // burying that signal in a generic HTTP-failure message.
-        const looksLikeContextLimit = /context length|maximum context|too many tokens|token limit/i.test(raw);
-        throw new Error(
-          `HTTP ${status}${looksLikeContextLimit ? " (possible context/token limit)" : ""}: ${raw.slice(0, 300)}`,
-        );
-      }
-      const data = JSON.parse(raw);
-      const choice = data.choices?.[0];
-      const content = choice?.message?.content;
-      if (!content) {
-        // finish_reason "length" means max_tokens was exhausted before any content came back -
-        // a strong signal this is a token-budget problem, not a generic model failure. usage
-        // (when present) shows exactly how many prompt/completion tokens were consumed.
-        throw new Error(
-          `Empty LLM response (finish_reason=${choice?.finish_reason ?? "unknown"}, ` +
-          `usage=${JSON.stringify(data.usage ?? {})})`,
-        );
+
+      const timeoutMs = attempt.withSchema
+        ? GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS
+        : GEMINI_CHAT_TIMEOUT_MS;
+
+      const result = await withTimeout(
+        model.generateContent({ contents: requestContents }),
+        timeoutMs,
+        "Gemini request",
+      );
+
+      const text = result.response.text();
+      if (!text?.trim()) {
+        const finishReason = result.response.candidates?.[0]?.finishReason;
+        throw new Error(`Empty LLM response (finishReason=${finishReason ?? "unknown"})`);
       }
       try {
-        return JSON.parse(content);
+        return JSON.parse(text);
       } catch {
-        return extractJsonBlock(content);
+        return extractJsonBlock(text);
       }
     } catch (err) {
       lastError = err;
-      log("calypso", `${appName} (schema=${attempt.withSchema}) failed: ${err.message}`);
+      log("gemini", `(schema=${attempt.withSchema}) failed: ${err.message}`);
     }
   }
-  throw lastError ?? new Error("callCalypsoChat failed");
-}
-
-/** Races every currently-ONLINE candidate in parallel and returns whichever responds
- * successfully first (STOPped candidates are still primed to start for next time, without
- * blocking this request on their 4-5 minute cold start). Trades a bit of duplicate Calypso
- * compute for much better worst-case latency and reliability than trying candidates one at a
- * time - a slow or failing candidate no longer delays the others. CALYPSO_TOTAL_TIMEOUT_MS is
- * kept as an extra safety net on top of each attempt's own bounded per-request timeouts. */
-async function callCalypso(messages, responseFormat, maxTokens, temperature) {
-  const onlineCandidates = [];
-  for (const { app, model } of CALYPSO_MODEL_CANDIDATES) {
-    const state = await getAppState(app);
-    if (state === "ONLINE") {
-      onlineCandidates.push({ app, model });
-      continue;
-    }
-    if (state === "STOP") void triggerStart(app);
-    log("calypso", `Skipping ${app} (state=${state})`);
-  }
-  if (onlineCandidates.length === 0) {
-    throw new LlmUnavailableError("No candidate Calypso models are ONLINE");
-  }
-  log(
-    "calypso",
-    `Racing ${onlineCandidates.length} online candidate(s): ${onlineCandidates.map((c) => c.app).join(", ")}`,
-  );
-  const attempts = onlineCandidates.map(({ app, model }) =>
-    callCalypsoChat(app, model, messages, { responseFormat, maxTokens, temperature }).catch((err) => {
-      log("calypso", `${app} chat call failed: ${err.message}`);
-      throw err;
-    }),
-  );
-  const overallTimeout = new Promise((_resolve, reject) => {
-    setTimeout(
-      () => reject(new LlmUnavailableError("Calypso race exceeded overall time budget")),
-      CALYPSO_TOTAL_TIMEOUT_MS,
-    );
-  });
-  try {
-    return await Promise.race([Promise.any(attempts), overallTimeout]);
-  } catch (err) {
-    if (err instanceof AggregateError) {
-      throw new LlmUnavailableError("All online Calypso candidates failed");
-    }
-    throw err;
-  }
+  throw lastError ?? new LlmUnavailableError("callGemini failed");
 }
 
 function gapAnalysisSchema() {
@@ -664,7 +550,7 @@ const OUTPUT_STRUCTURE_APPLICABILITY = {
 /** Innovation Assistance (docs/Enhancements3.md §3 continued) - each level pairs a `temperature`
  * value with a distinct prompt instruction. Both `.guidance` and `.temperature` are consumed by
  * `buildGenerateSystemPrompt`/`handleGenerate` today (the `temperature` is passed straight
- * through to `callCalypso`). */
+ * through to `callGemini`). */
 const INNOVATION_ASSISTANCE = {
   disabled: {
     temperature: 0.2,
@@ -700,7 +586,7 @@ const INNOVATION_ASSISTANCE = {
   },
 };
 
-/** A raised Innovation Assistance level also raises Calypso's `temperature` (see
+/** A raised Innovation Assistance level also raises Gemini's `temperature` (see
  * `INNOVATION_ASSISTANCE` above), which affects the model's writing throughout the whole
  * response - not just the specifically-labeled suggestion/challenge/ideation additions each
  * level's own guidance asks for. This keeps the core, directly-requested content grounded
@@ -895,7 +781,7 @@ async function handleGapAnalysis(req, res) {
       { role: "system", content: GAP_ANALYSIS_SYSTEM_PROMPT },
       { role: "user", content: JSON.stringify({ productTitle, productDetails, selectedTypes, answers }) },
     ];
-    const result = await callCalypso(messages, gapAnalysisSchema(), CALYPSO_GAP_ANALYSIS_MAX_TOKENS);
+    const result = await callGemini(messages, gapAnalysisSchema(), GEMINI_GAP_ANALYSIS_MAX_TOKENS);
     res.json(result);
   } catch (err) {
     logError("llm", "gap-analysis failed:", err);
@@ -957,10 +843,10 @@ async function handleGenerate(req, res) {
       },
     ];
     const temperature = innovationAssistance ? INNOVATION_ASSISTANCE[innovationAssistance]?.temperature : undefined;
-    const result = await callCalypso(
+    const result = await callGemini(
       messages,
       generateSchema(sections ?? []),
-      CALYPSO_GENERATE_MAX_TOKENS,
+      GEMINI_GENERATE_MAX_TOKENS,
       temperature,
     );
     // The frontend's GenerateResponse contract expects { sections: {...} }, but generateSchema's
@@ -973,19 +859,18 @@ async function handleGenerate(req, res) {
 }
 
 async function handleLlmStatus(_req, res) {
-  const primary = CALYPSO_MODEL_CANDIDATES[0];
-  const state = primary ? await getAppState(primary.app) : "UNKNOWN";
-  res.json({ ready: state === "ONLINE", primary: { app: primary?.app ?? null, state } });
+  const configured = Boolean(GEMINI_API_KEY);
+  res.json({
+    ready: configured,
+    primary: { app: "gemini", state: configured ? "ONLINE" : "MISCONFIGURED" },
+  });
 }
 
 async function handleLlmWarmup(_req, res) {
-  const primary = CALYPSO_MODEL_CANDIDATES[0];
-  if (primary) void triggerStart(primary.app);
-  res.status(202).json({ triggered: Boolean(primary) });
+  res.status(202).json({ triggered: false });
 }
 
-/** docs/Enhancements2.md §3.5 - mirrors handleGapAnalysis's pattern exactly: one callCalypso
- * call, small purpose-built system prompt, response_format schema. No deterministic fallback -
+/** docs/Enhancements2.md §3.5 - mirrors handleGapAnalysis's pattern exactly: one callGemini
  * there is no sensible guess at a user's uploaded template's structure. */
 const TEMPLATE_EXTRACT_SYSTEM_PROMPT =
   "Extract an ordered list of section/heading names from this requirements/product template. " +
@@ -998,7 +883,7 @@ async function handleTemplateExtract(req, res) {
       { role: "system", content: TEMPLATE_EXTRACT_SYSTEM_PROMPT },
       { role: "user", content: JSON.stringify({ docType, rawText }) },
     ];
-    const result = await callCalypso(messages, templateExtractSchema(), CALYPSO_TEMPLATE_EXTRACT_MAX_TOKENS);
+    const result = await callGemini(messages, templateExtractSchema(), GEMINI_TEMPLATE_EXTRACT_MAX_TOKENS);
     res.json(result);
   } catch (err) {
     logError("llm", "template-extract failed:", err);
@@ -1006,12 +891,11 @@ async function handleTemplateExtract(req, res) {
   }
 }
 
-/** docs/Enhancements4.md §4.2 - Phase 1 (.txt/.md) needs no Calypso call at all, just enforces
+/** docs/Enhancements4.md §4.2 - Phase 1 (.txt/.md) needs no Gemini call at all, just enforces
  * the per-document character budget (§4.3); Phase 2 (.docx, already converted to text
  * client-side via mammoth) is identical to Phase 1 here. Phase 3 (.pdf/scanned documents, sent
- * as `base64Content`) routes to Calypso's multimodal-tagged candidate - unlike Phase 1/2, a
- * Calypso failure here is a genuine LLM_UNAVAILABLE, not a bug, per §4.6's own error-handling row
- * for this specific phase. */
+ * as `base64Content`) routes to Gemini multimodal - unlike Phase 1/2, a Gemini failure here is a
+ * genuine LLM_UNAVAILABLE, not a bug, per §4.6's own error-handling row for this specific phase. */
 async function handleContextExtract(req, res) {
   const { rawText, base64Content } = req.body ?? {};
   let text;
@@ -1046,15 +930,7 @@ function pdfExtractSchema() {
   };
 }
 
-/** docs/Enhancements4.md §4.1 Phase 3 - routes to the multimodal-tagged `vllm-qwen36-35b-a3b`
- * candidate via the same OpenAI-compatible chat endpoint already used elsewhere, sending the PDF
- * as a base64 data URL content block (the standard OpenAI vision `image_url` convention).
- * **UNVERIFIED**: this repo has no documented request/response contract for PDF-as-image_url
- * with this specific deployment (unlike every other Calypso integration in this file, which was
- * live-tested against the real cluster) - `middlewareai-mineru`'s actual OCR API is also
- * undocumented and requires a different (multipart) request shape `calypsoRequest` doesn't
- * support, so this multimodal-chat approach was chosen as the lower-risk, verifiable-later
- * option. Needs a real PDF upload to confirm the deployment actually accepts this format. */
+/** PDF text extraction via Gemini multimodal (inline PDF data). */
 async function extractPdfViaMultimodal(base64Pdf) {
   const messages = [
     {
@@ -1070,7 +946,7 @@ async function extractPdfViaMultimodal(base64Pdf) {
       ],
     },
   ];
-  const result = await callCalypso(messages, pdfExtractSchema(), CALYPSO_PDF_EXTRACT_MAX_TOKENS);
+  const result = await callGemini(messages, pdfExtractSchema(), GEMINI_PDF_EXTRACT_MAX_TOKENS, undefined, GEMINI_PDF_MODEL);
   return typeof result.extractedText === "string" ? result.extractedText : "";
 }
 
@@ -1273,14 +1149,10 @@ if (envConfigResolved) {
   );
 }
 
-if (CALYPSO_MODEL_CANDIDATES.length > 0) {
-  log(
-    "llm",
-    `Calypso enabled - primary: ${CALYPSO_MODEL_CANDIDATES[0].app}, ` +
-    `${CALYPSO_MODEL_CANDIDATES.length - 1} fallback candidate(s) configured`,
-  );
+if (GEMINI_API_KEY) {
+  log("llm", `Gemini enabled - model: ${GEMINI_MODEL}, pdf model: ${GEMINI_PDF_MODEL}`);
 } else {
-  log("llm", "WARNING: no Calypso model candidates configured - LLM path will be unavailable");
+  log("llm", "WARNING: GEMINI_API_KEY not set - LLM path will be unavailable");
 }
 
 app.listen(PORT, () => {

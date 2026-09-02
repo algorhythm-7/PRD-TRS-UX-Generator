@@ -1,12 +1,24 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { applyContextExtractBudget, templateExtractSchema } from "../../vite.config";
+import { applyContextExtractBudget, openAiSchemaToGemini, templateExtractSchema } from "../../vite.config";
 
 // Contract tests for the two new endpoints added in docs/EnhancementToDo3.md §4 (task 3):
 // POST /_api/template-extract and POST /_api/context-extract (Phase 1). Both server.mjs and
 // vite.config.ts implement these identically; tested via vite.config.ts for the same reasons
 // documented in tests/server/buildGenerateSystemPrompt.test.ts (server.mjs's Express dependencies
 // aren't installed in this workspace).
+
+describe("openAiSchemaToGemini", () => {
+  it("unwraps json_schema.schema for Gemini responseSchema", () => {
+    const wrapped = templateExtractSchema();
+    const inner = (wrapped as { json_schema: { schema: unknown } }).json_schema.schema;
+    expect(openAiSchemaToGemini(wrapped)).toEqual(inner);
+  });
+
+  it("returns undefined when no format is provided", () => {
+    expect(openAiSchemaToGemini(undefined)).toBeUndefined();
+  });
+});
 
 describe("templateExtractSchema (POST /_api/template-extract response contract)", () => {
   it("requires a top-level 'sections' array of strings, matching docs/Enhancements2.md §3.5", () => {

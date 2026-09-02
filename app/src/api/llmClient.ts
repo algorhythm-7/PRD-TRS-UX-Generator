@@ -9,12 +9,8 @@ import type {
   TargetAudience,
 } from "../generation/contract";
 
-// Must exceed the backend's own worst-case Calypso wait, bounded by CALYPSO_TOTAL_TIMEOUT_MS
-// (default 115s - one candidate's structured-output attempt plus its plain-JSON retry) - large
-// internal models can legitimately take longer than a typical commercial API to respond, and a
-// client-side abort shorter than the backend's own timeout would discard responses the backend
-// was still willing to wait for, forcing an unnecessary fallback.
-const DEFAULT_TIMEOUT_MS = 130000;
+// Must exceed the backend's own worst-case Gemini wait (default 90s structured + retry).
+const DEFAULT_TIMEOUT_MS = 100000;
 
 /** Thrown for any non-2xx or timed-out /_api/llm/* call (IFACE-LLMCLIENT). */
 export class LlmClientError extends Error {
@@ -130,9 +126,9 @@ export function postContextExtract(filename: string, rawText: string): Promise<C
   return postJson<ContextExtractResponse>("/_api/context-extract", { filename, rawText });
 }
 
-/** docs/Enhancements4.md §4.2 Phase 3 (.pdf/scanned documents) - routed server-side to Calypso's
- * OCR/multimodal model, so (unlike Phase 1/2) this can genuinely throw LlmClientError when
- * Calypso is unavailable (§4.6's own error-handling row for this phase specifically). */
+/** docs/Enhancements4.md §4.2 Phase 3 (.pdf/scanned documents) - routed server-side to Gemini
+ * multimodal, so (unlike Phase 1/2) this can genuinely throw LlmClientError when the LLM
+ * service is unavailable (§4.6's own error-handling row for this phase specifically). */
 export function postContextExtractBinary(
   filename: string,
   base64Content: string,

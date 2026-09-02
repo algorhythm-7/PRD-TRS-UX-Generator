@@ -115,7 +115,7 @@ function previewText(text: string, maxLength = 80): string {
 }
 
 /** docs/Enhancements4.md §4.1 Phase 2 - .docx is parsed client-side (no server round-trip, no
- * Calypso token spend, per the plan's own reasoning); every other supported type is already
+ * LLM token spend, per the plan's own reasoning); every other supported type is already
  * plain text read via `File.text()` (Phase 1). */
 async function readFileAsText(file: File): Promise<string> {
   if (file.name.toLowerCase().endsWith(".docx")) {
@@ -126,7 +126,7 @@ async function readFileAsText(file: File): Promise<string> {
   return file.text();
 }
 
-/** docs/Enhancements4.md §4.1 Phase 3 - .pdf is sent to the server as base64 for Calypso
+/** docs/Enhancements4.md §4.1 Phase 3 - .pdf is sent to the server as base64 for Gemini
  * OCR/multimodal extraction, since it isn't plain text and can't be parsed client-side. */
 async function fileToBase64(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
@@ -265,7 +265,7 @@ export function GenerationProfileScreen({
   }
 
   /** docs/Enhancements4.md §4.1 Phase 2 - .docx is parsed client-side (no server round-trip, no
-   * Calypso token spend, per the plan's own reasoning); every other supported type is already
+   * LLM token spend, per the plan's own reasoning); every other supported type is already
    * plain text read via `File.text()` (Phase 1). */
   async function handleCustomTemplateUpload(docType: DocType, file: File) {
     try {
@@ -277,7 +277,7 @@ export function GenerationProfileScreen({
     }
   }
 
-  /** docs/Enhancements4.md §4.1 Phase 3 - .pdf is routed server-side to Calypso's OCR/multimodal
+  /** docs/Enhancements4.md §4.1 Phase 3 - .pdf is routed server-side to Gemini multimodal
    * model via `postContextExtractBinary`, since it can't be read as plain text client-side. */
   async function extractTextFromUpload(file: File): Promise<string> {
     if (file.name.toLowerCase().endsWith(".pdf")) {

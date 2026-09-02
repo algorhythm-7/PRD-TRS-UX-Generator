@@ -30,7 +30,7 @@ const LLM_STATUS_POLL_MS = 20000;
  * edited/thumbs-down counts start at 0 (nothing could have been edited yet) and are updated live
  * as the user interacts with the output (§11 task 2, sessionMemory.ts's `setLastSession*`
  * helpers). Written regardless of LLM vs. deterministic-fallback source - this logs the user's
- * chosen preferences, not whether Calypso was reachable. */
+ * chosen preferences, not whether the LLM service was reachable. */
 function buildSessionRecord(
   request: GenerationRequest,
   profile: GenerationProfileScreenValue | null,
@@ -96,7 +96,7 @@ export function App(): JSX.Element {
   const [lastInput, setLastInput] = useState<LlmRequestInput | null>(null);
   const [regenerateFallbackFor, setRegenerateFallbackFor] = useState<DocType | null>(null);
 
-  // Proactively warm up the primary Calypso model and poll its readiness in the background.
+  // Poll Gemini readiness in the background (ready when GEMINI_API_KEY is configured).
   // Never blocks Generate - the deterministic fallback is always available in the meantime.
   useEffect(() => {
     let cancelled = false;

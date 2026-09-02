@@ -1,7 +1,7 @@
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
-import https from "https";
+import { GoogleGenerativeAI, type Content, type Part } from "@google/generative-ai";
 import type { IncomingMessage, ServerResponse } from "http";
 
 interface TokenCache {
@@ -9,9 +9,8 @@ interface TokenCache {
   expiresAt: number;
 }
 
-/** docs/Enhancements4.md §4.1 Phase 3 - a chat message's content is usually a plain string, but
- * multimodal requests (PDF-as-image_url) need an array of content blocks instead. */
-type CalypsoMessageContent =
+/** Multimodal message content (e.g. PDF-as-inline-data). */
+type LlmMessageContent =
   | string
   | Array<{ type: string; text?: string; image_url?: { url: string } }>;
 
@@ -451,7 +450,7 @@ const OUTPUT_STRUCTURE_APPLICABILITY: Record<string, readonly string[]> = {
 /** Innovation Assistance (docs/Enhancements3.md §3 continued) - each level pairs a `temperature`
  * value with a distinct prompt instruction. Both `.guidance` and `.temperature` are consumed by
  * `buildGenerateSystemPrompt`/`handleGenerate` today (the `temperature` is passed straight
- * through to `callCalypso`). */
+ * through to `callGemini`). */
 const INNOVATION_ASSISTANCE: Record<string, { temperature: number; guidance: string }> = {
   disabled: {
     temperature: 0.2,
@@ -487,7 +486,7 @@ const INNOVATION_ASSISTANCE: Record<string, { temperature: number; guidance: str
   },
 };
 
-/** A raised Innovation Assistance level also raises Calypso's `temperature` (see
+/** A raised Innovation Assistance level also raises Gemini's `temperature` (see
  * `INNOVATION_ASSISTANCE` above), which affects the model's writing throughout the whole
  * response - not just the specifically-labeled suggestion/challenge/ideation additions each
  * level's own guidance asks for. This keeps the core, directly-requested content grounded
@@ -793,133 +792,67 @@ export function applyContextExtractBudget(
  * would also execute its unconditional startup side effects (app.listen, etc.). Keep this in
  * sync with server.mjs's LLM section when either changes.
  */
-interface CalypsoCandidate {
-  app: string;
-  model: string;
+export function openAiSchemaToGemini(responseFormat: unknown): unknown {
+  if (!responseFormat) return undefined;
+  return (
+    (responseFormat as { json_schema?: { schema?: unknown } })?.json_schema?.schema ??
+    responseFormat
+  );
 }
 
-const DEFAULT_CALYPSO_MODEL_CANDIDATES: CalypsoCandidate[] = [
-  { app: "vllm-glm-52", model: "cyankiwi/GLM-5.2-AWQ-INT4" },
-  { app: "vllm-qwen36-35b-a3b", model: "Qwen/Qwen3.6-35B-A3B" },
-  { app: "vllm-gpt-oss-120b", model: "openai/gpt-oss-120b" },
-];
-
-function parseModelCandidates(raw: string | undefined): CalypsoCandidate[] {
-  if (!raw) return DEFAULT_CALYPSO_MODEL_CANDIDATES;
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (
-      Array.isArray(parsed) &&
-      parsed.every((c) => c && typeof c === "object" && "app" in c && "model" in c)
-    ) {
-      return parsed as CalypsoCandidate[];
-    }
-  } catch {
-    // fall through to default below
+function convertContentToParts(content: LlmMessageContent): Part[] {
+  if (typeof content === "string") return [{ text: content }];
+  if (Array.isArray(content)) {
+    return content.map((block) => {
+      if (block.type === "text" && block.text) return { text: block.text };
+      if (block.type === "image_url" && block.image_url?.url) {
+        const match = block.image_url.url.match(/^data:([^;]+);base64,(.+)$/);
+        if (match) return { inlineData: { mimeType: match[1], data: match[2] } };
+      }
+      return { text: JSON.stringify(block) };
+    });
   }
-  return DEFAULT_CALYPSO_MODEL_CANDIDATES;
+  return [{ text: String(content) }];
+}
+
+function messagesToGemini(messages: Array<{ role: string; content: LlmMessageContent }>) {
+  const systemInstruction = messages
+    .filter((m) => m.role === "system")
+    .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
+    .join("\n\n");
+  const contents: Content[] = messages
+    .filter((m) => m.role !== "system")
+    .map((m) => ({
+      role: (m.role === "assistant" ? "model" : "user") as "user" | "model",
+      parts: convertContentToParts(m.content),
+    }));
+  return { systemInstruction: systemInstruction || undefined, contents };
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_resolve, reject) => {
+      setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+    }),
+  ]);
 }
 
 function createLlmDevPlugin(env: Record<string, string>): Plugin {
-  const baseUrl = env.CALYPSO_BASE_URL || "https://apps.services.calypso.intra.chrysler.com";
-  const candidates = parseModelCandidates(env.CALYPSO_MODEL_CANDIDATES);
-  const chatTimeoutMs = Number(env.CALYPSO_CHAT_TIMEOUT_MS || 90000);
-  // See server.mjs's matching constant: the response_format attempt has been observed to hang for
-  // the full chat timeout or return an empty completion on larger prompts - fail it fast instead.
-  const structuredAttemptTimeoutMs = Number(env.CALYPSO_STRUCTURED_ATTEMPT_TIMEOUT_MS || 20000);
-  // Caps callCalypso's whole candidate loop - see server.mjs's matching constant.
-  const totalTimeoutMs = Number(env.CALYPSO_TOTAL_TIMEOUT_MS || 115000);
-  const stateTimeoutMs = Number(env.CALYPSO_STATE_TIMEOUT_MS || 10000);
-  // Gap analysis only ever returns up to 5 short questions, but was observed live hitting this
-  // exact cap with EMPTY content on some candidates (e.g. vllm-qwen36-35b-a3b, via the
-  // finish_reason/usage diagnostics above) before ever producing valid JSON - see server.mjs's
-  // matching comment. Generate returns every requested document's full section text in one JSON
-  // object, so it needs a much larger ceiling.
-  const gapAnalysisMaxTokens = Number(env.CALYPSO_GAP_ANALYSIS_MAX_TOKENS || 4096);
-  const generateMaxTokens = Number(env.CALYPSO_GENERATE_MAX_TOKENS || 8192);
-  const templateExtractMaxTokens = Number(env.CALYPSO_TEMPLATE_EXTRACT_MAX_TOKENS || 4096);
-  // docs/Enhancements4.md §4.3: per-document cap enforced by /_api/context-extract - see
-  // server.mjs's matching constant for why the combined 12,000-char/3-document cap is not
-  // implemented here (single-document request shape).
+  const geminiApiKey = env.GEMINI_API_KEY || "";
+  const geminiModel = env.GEMINI_MODEL || "gemini-2.0-flash";
+  const geminiPdfModel = env.GEMINI_PDF_MODEL || geminiModel;
+  const chatTimeoutMs = Number(env.GEMINI_CHAT_TIMEOUT_MS || 90000);
+  const structuredAttemptTimeoutMs = Number(env.GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS || 20000);
+  const gapAnalysisMaxTokens = Number(env.GEMINI_GAP_ANALYSIS_MAX_TOKENS || 4096);
+  const generateMaxTokens = Number(env.GEMINI_GENERATE_MAX_TOKENS || 8192);
+  const templateExtractMaxTokens = Number(env.GEMINI_TEMPLATE_EXTRACT_MAX_TOKENS || 4096);
   const contextExtractCharLimit = Number(env.CONTEXT_EXTRACT_CHAR_LIMIT || 8000);
-  // docs/Enhancements4.md §4.1 Phase 3 (.pdf/scanned documents).
-  const pdfExtractMaxTokens = Number(env.CALYPSO_PDF_EXTRACT_MAX_TOKENS || 8192);
+  const pdfExtractMaxTokens = Number(env.GEMINI_PDF_EXTRACT_MAX_TOKENS || 8192);
 
-  // Calypso's certificate is self-signed (internal-only host, per docs/XYZCalypso.md's own
-  // verify=False guidance). Scope the bypass to this dedicated agent/host only.
-  const calypsoAgent = new https.Agent({ rejectUnauthorized: false });
-
-  function calypsoRequest(
-    urlPath: string,
-    opts: { method?: string; body?: unknown; timeoutMs?: number } = {},
-  ): Promise<{ status: number; raw: string }> {
-    const { method = "GET", body, timeoutMs = stateTimeoutMs } = opts;
-    return new Promise((resolve, reject) => {
-      const url = new URL(urlPath, baseUrl);
-      const payload = body ? JSON.stringify(body) : undefined;
-      const req = https.request(
-        url,
-        {
-          method,
-          agent: calypsoAgent,
-          headers: payload
-            ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
-            : undefined,
-        },
-        (res) => {
-          const chunks: Buffer[] = [];
-          res.on("data", (c: Buffer) => chunks.push(c));
-          res.on("end", () => {
-            clearTimeout(deadline);
-            resolve({ status: res.statusCode || 0, raw: Buffer.concat(chunks).toString("utf-8") });
-          });
-        },
-      );
-      // A hard deadline, not an inactivity timer - see server.mjs's matching comment: a response
-      // that trickles in via periodic keep-alive bytes can silently defeat req.setTimeout and hang
-      // far past timeoutMs. This fires unconditionally once timeoutMs elapses.
-      const deadline = setTimeout(() => {
-        req.destroy(new Error(`Calypso request timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-      req.on("error", (err) => {
-        clearTimeout(deadline);
-        reject(err);
-      });
-      if (payload) req.write(payload);
-      req.end();
-    });
-  }
-
-  async function getAppState(appName: string): Promise<string> {
-    try {
-      const { status, raw } = await calypsoRequest(
-        `/cmd/state?application=${encodeURIComponent(appName)}`,
-        { timeoutMs: stateTimeoutMs },
-      );
-      if (status < 200 || status >= 300) return "UNKNOWN";
-      const trimmed = raw.trim();
-      try {
-        const parsed = JSON.parse(trimmed) as unknown;
-        if (typeof parsed === "string") return parsed;
-      } catch {
-        // Not JSON-encoded - fall back to using the raw trimmed text as-is.
-      }
-      return trimmed || "UNKNOWN";
-    } catch (err) {
-      console.log(`[llm-dev] getAppState(${appName}) failed:`, err);
-      return "UNKNOWN";
-    }
-  }
-
-  async function triggerStart(appName: string): Promise<void> {
-    try {
-      await calypsoRequest(`/cmd/start?application=${encodeURIComponent(appName)}`, {
-        timeoutMs: stateTimeoutMs,
-      });
-      console.log(`[llm-dev] Start requested for ${appName}`);
-    } catch (err) {
-      console.log(`[llm-dev] triggerStart(${appName}) failed:`, err);
-    }
+  function getGeminiClient(): GoogleGenerativeAI {
+    if (!geminiApiKey) throw new Error("LLM_UNAVAILABLE");
+    return new GoogleGenerativeAI(geminiApiKey);
   }
 
   function extractJsonBlock(text: string): unknown {
@@ -932,128 +865,78 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
     return JSON.parse(stripped.slice(start, end + 1));
   }
 
-  async function callCalypsoChat(
-    appName: string,
-    modelId: string,
-    messages: Array<{ role: string; content: CalypsoMessageContent }>,
+  async function callGemini(
+    messages: Array<{ role: string; content: LlmMessageContent }>,
     responseFormat: unknown,
     maxTokens: number,
     temperature?: number,
+    modelId: string = geminiModel,
   ): Promise<unknown> {
+    const { systemInstruction, contents } = messagesToGemini(messages);
     const attempts = responseFormat ? [{ withSchema: true }, { withSchema: false }] : [{ withSchema: false }];
     let lastError: unknown;
+    const genAI = getGeminiClient();
+
     for (const attempt of attempts) {
       try {
-        const body: Record<string, unknown> = { model: modelId, messages, max_tokens: maxTokens };
-        if (temperature !== undefined) body.temperature = temperature;
-        if (attempt.withSchema) {
-          body.response_format = responseFormat;
-        } else if (responseFormat) {
-          const schema =
-            (responseFormat as { json_schema?: { schema?: unknown } })?.json_schema?.schema ??
-            responseFormat;
-          // "user" role, not "system" - some deployments (confirmed live: vllm-qwen36-35b-a3b)
-          // reject a second system message with "System message must be at the beginning".
-          body.messages = [
-            ...messages,
-            {
-              role: "user",
-              content:
-                "The following is a JSON Schema describing the required output shape - it is NOT " +
-                "the output itself. Respond with ONLY a single JSON object that satisfies this " +
-                "schema (real data filled in, no markdown code fences, no commentary, and never " +
-                "the schema itself): " + JSON.stringify(schema),
-            },
-          ];
+        const generationConfig: Record<string, unknown> = { maxOutputTokens: maxTokens };
+        if (temperature !== undefined) generationConfig.temperature = temperature;
+
+        let requestContents: Content[] = contents;
+        if (attempt.withSchema && responseFormat) {
+          generationConfig.responseMimeType = "application/json";
+          generationConfig.responseSchema = openAiSchemaToGemini(responseFormat);
+        } else if (!attempt.withSchema && responseFormat) {
+          const schema = openAiSchemaToGemini(responseFormat);
+          const schemaPrompt =
+            "The following is a JSON Schema describing the required output shape - it is NOT " +
+            "the output itself. Respond with ONLY a single JSON object that satisfies this " +
+            "schema (real data filled in, no markdown code fences, no commentary, and never " +
+            "the schema itself): " + JSON.stringify(schema);
+          if (requestContents.length === 0) {
+            requestContents = [{ role: "user", parts: [{ text: schemaPrompt }] }];
+          } else {
+            const last = requestContents[requestContents.length - 1];
+            requestContents = [
+              ...requestContents.slice(0, -1),
+              { ...last, parts: [...last.parts, { text: schemaPrompt }] },
+            ];
+          }
         }
-        const { status, raw } = await calypsoRequest(`/${appName}/v1/chat/completions`, {
-          method: "POST",
-          body,
-          timeoutMs: attempt.withSchema ? structuredAttemptTimeoutMs : chatTimeoutMs,
+
+        const model = genAI.getGenerativeModel({
+          model: modelId,
+          systemInstruction,
+          generationConfig,
         });
-        if (status < 200 || status >= 300) {
-          // Flag responses that look like a token/context-limit rejection distinctly, rather
-          // than burying that signal in a generic HTTP-failure message.
-          const looksLikeContextLimit = /context length|maximum context|too many tokens|token limit/i.test(raw);
-          throw new Error(
-            `HTTP ${status}${looksLikeContextLimit ? " (possible context/token limit)" : ""}: ${raw.slice(0, 300)}`,
-          );
-        }
-        const data = JSON.parse(raw) as {
-          choices?: { message?: { content?: string }; finish_reason?: string }[];
-          usage?: unknown;
-        };
-        const choice = data.choices?.[0];
-        const content = choice?.message?.content;
-        if (!content) {
-          // finish_reason "length" means max_tokens was exhausted before any content came back -
-          // a strong signal this is a token-budget problem, not a generic model failure.
-          throw new Error(
-            `Empty LLM response (finish_reason=${choice?.finish_reason ?? "unknown"}, ` +
-            `usage=${JSON.stringify(data.usage ?? {})})`,
-          );
+
+        const timeoutMs = attempt.withSchema ? structuredAttemptTimeoutMs : chatTimeoutMs;
+        const result = await withTimeout(
+          model.generateContent({ contents: requestContents }),
+          timeoutMs,
+          "Gemini request",
+        );
+
+        const text = result.response.text();
+        if (!text?.trim()) {
+          const finishReason = result.response.candidates?.[0]?.finishReason;
+          throw new Error(`Empty LLM response (finishReason=${finishReason ?? "unknown"})`);
         }
         try {
-          return JSON.parse(content);
+          return JSON.parse(text);
         } catch {
-          return extractJsonBlock(content);
+          return extractJsonBlock(text);
         }
       } catch (err) {
         lastError = err;
-        console.log(`[llm-dev] ${appName} (schema=${attempt.withSchema}) failed:`, err);
+        console.log(`[llm-dev] Gemini (schema=${attempt.withSchema}) failed:`, err);
       }
     }
-    throw lastError instanceof Error ? lastError : new Error("callCalypsoChat failed");
+    throw lastError instanceof Error ? lastError : new Error("LLM_UNAVAILABLE");
   }
 
-  /** Races every currently-ONLINE candidate in parallel and returns whichever responds
-   * successfully first - see server.mjs's matching function for the full rationale. */
-  async function callCalypso(
-    messages: Array<{ role: string; content: CalypsoMessageContent }>,
-    responseFormat: unknown,
-    maxTokens: number,
-    temperature?: number,
-  ): Promise<unknown> {
-    const onlineCandidates: CalypsoCandidate[] = [];
-    for (const candidate of candidates) {
-      const state = await getAppState(candidate.app);
-      if (state === "ONLINE") {
-        onlineCandidates.push(candidate);
-        continue;
-      }
-      if (state === "STOP") void triggerStart(candidate.app);
-      console.log(`[llm-dev] Skipping ${candidate.app} (state=${state})`);
-    }
-    if (onlineCandidates.length === 0) {
-      throw new Error("LLM_UNAVAILABLE");
-    }
-    console.log(
-      `[llm-dev] Racing ${onlineCandidates.length} online candidate(s): ` +
-      onlineCandidates.map((c) => c.app).join(", "),
-    );
-    const attempts = onlineCandidates.map(({ app, model }) =>
-      callCalypsoChat(app, model, messages, responseFormat, maxTokens, temperature).catch((err) => {
-        console.log(`[llm-dev] ${app} chat call failed:`, err);
-        throw err;
-      }),
-    );
-    const overallTimeout = new Promise<never>((_resolve, reject) => {
-      setTimeout(() => reject(new Error("LLM_UNAVAILABLE")), totalTimeoutMs);
-    });
-    try {
-      return await Promise.race([Promise.any(attempts), overallTimeout]);
-    } catch (err) {
-      if (err instanceof AggregateError) {
-        throw new Error("LLM_UNAVAILABLE");
-      }
-      throw err;
-    }
-  }
-
-  /** docs/Enhancements4.md §4.1 Phase 3 - see server.mjs's matching function for the full
-   * "UNVERIFIED - needs a real PDF upload to confirm" rationale. */
   async function extractPdfViaMultimodal(base64Pdf: string): Promise<string> {
-    const messages: Array<{ role: string; content: CalypsoMessageContent }> = [
+    const messages: Array<{ role: string; content: LlmMessageContent }> = [
       {
         role: "user",
         content: [
@@ -1067,9 +950,13 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
         ],
       },
     ];
-    const result = (await callCalypso(messages, pdfExtractSchema(), pdfExtractMaxTokens)) as {
-      extractedText?: string;
-    };
+    const result = (await callGemini(
+      messages,
+      pdfExtractSchema(),
+      pdfExtractMaxTokens,
+      undefined,
+      geminiPdfModel,
+    )) as { extractedText?: string };
     return typeof result.extractedText === "string" ? result.extractedText : "";
   }
 
@@ -1077,32 +964,30 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
     name: "llm-dev",
     configureServer(server) {
       console.log(
-        `[llm-dev] Calypso enabled - primary: ${candidates[0]?.app ?? "none"}, ` +
-        `${Math.max(candidates.length - 1, 0)} fallback candidate(s) configured`,
+        `[llm-dev] Gemini enabled - model: ${geminiModel}` +
+        (geminiApiKey ? "" : " (GEMINI_API_KEY not set)"),
       );
 
       server.middlewares.use((req: IncomingMessage, res: ServerResponse, next: (err?: unknown) => void) => {
         if (req.method === "GET" && req.url === "/_api/llm-status") {
-          void (async () => {
-            const primary = candidates[0];
-            const state = primary ? await getAppState(primary.app) : "UNKNOWN";
-            res.setHeader("Content-Type", "application/json");
-            res.end(JSON.stringify({ ready: state === "ONLINE", primary: { app: primary?.app ?? null, state } }));
-          })();
+          const configured = Boolean(geminiApiKey);
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              ready: configured,
+              primary: { app: "gemini", state: configured ? "ONLINE" : "MISCONFIGURED" },
+            }),
+          );
           return;
         }
         if (req.method === "POST" && req.url === "/_api/llm-warmup") {
-          const primary = candidates[0];
-          if (primary) void triggerStart(primary.app);
           res.statusCode = 202;
           res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ triggered: Boolean(primary) }));
+          res.end(JSON.stringify({ triggered: false }));
           return;
         }
         if (req.method === "POST" && req.url === "/_api/context-extract") {
-          // docs/Enhancements4.md §4.2 - Phase 1/2 (.txt/.md/.docx, already text) need no Calypso
-          // call, just the character budget (§4.3); Phase 3 (.pdf, `base64Content`) routes to
-          // Calypso, so a failure there is a genuine LLM_UNAVAILABLE (§4.6).
+          // Phase 1/2 (.txt/.md/.docx) need no Gemini call; Phase 3 (.pdf) routes to Gemini.
           void (async () => {
             const payload = await readJsonBody(req);
             try {
@@ -1139,7 +1024,7 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
             let result: unknown;
             if (isGapAnalysis) {
               const { productTitle, productDetails, selectedTypes, answers } = payload;
-              result = await callCalypso(
+              result = await callGemini(
                 [
                   { role: "system", content: GAP_ANALYSIS_SYSTEM_PROMPT },
                   {
@@ -1152,7 +1037,7 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
               );
             } else if (isTemplateExtract) {
               const { docType, rawText } = payload;
-              result = await callCalypso(
+              result = await callGemini(
                 [
                   { role: "system", content: TEMPLATE_EXTRACT_SYSTEM_PROMPT },
                   { role: "user", content: JSON.stringify({ docType, rawText }) },
@@ -1203,7 +1088,7 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
               const priorAttemptContext = buildPriorAttemptBlock(
                 priorAttempt as PriorAttemptPayload | undefined,
               );
-              result = await callCalypso(
+              result = await callGemini(
                 [
                   { role: "system", content: systemPrompt },
                   {

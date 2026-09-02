@@ -25,7 +25,7 @@ describe("LLM warm-up status banner", () => {
   it("shows the warm-up notice immediately, before the first status check resolves", () => {
     vi.mocked(llmClient.getLlmStatus).mockResolvedValue({
       ready: false,
-      primary: { app: "vllm-glm-52", state: "STARTING" },
+      primary: { app: "gemini", state: "MISCONFIGURED" },
     });
 
     render(<App />);
@@ -39,7 +39,7 @@ describe("LLM warm-up status banner", () => {
   it("hides the warm-up notice once a status check reports ready", async () => {
     vi.mocked(llmClient.getLlmStatus).mockResolvedValue({
       ready: true,
-      primary: { app: "vllm-glm-52", state: "ONLINE" },
+      primary: { app: "gemini", state: "ONLINE" },
     });
 
     render(<App />);
@@ -52,7 +52,7 @@ describe("LLM warm-up status banner", () => {
   it("still generates immediately (via the deterministic fallback) regardless of warm-up state", async () => {
     vi.mocked(llmClient.getLlmStatus).mockResolvedValue({
       ready: false,
-      primary: { app: "vllm-glm-52", state: "STOP" },
+      primary: { app: "gemini", state: "MISCONFIGURED" },
     });
 
     render(<App />);
