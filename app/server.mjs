@@ -4,7 +4,7 @@ import { createProxyMiddleware } from "http-proxy-middleware";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, "dist");
@@ -50,7 +50,7 @@ class LlmUnavailableError extends Error {}
 
 function getGeminiClient() {
   if (!GEMINI_API_KEY) throw new LlmUnavailableError("GEMINI_API_KEY not set");
-  return new GoogleGenerativeAI(GEMINI_API_KEY);
+  return new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 }
 
 function extractJsonBlock(text) {
@@ -192,24 +192,22 @@ async function callGemini(messages, responseFormat, maxTokens, temperature, mode
           }
         }
 
-        const model = genAI.getGenerativeModel({
-          model: currentModelId,
-          systemInstruction,
-          generationConfig,
-        });
-
         const timeoutMs = attempt.withSchema
           ? GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS
           : GEMINI_CHAT_TIMEOUT_MS;
         const result = await withTimeout(
-          model.generateContent({ contents: requestContents }),
+          genAI.models.generateContent({
+            model: currentModelId,
+            contents: requestContents,
+            config: { ...generationConfig, systemInstruction },
+          }),
           timeoutMs,
           "Gemini request",
         );
 
-        const text = result.response.text();
+        const text = result.text;
         if (!text?.trim()) {
-          const finishReason = result.response.candidates?.[0]?.finishReason;
+          const finishReason = result.candidates?.[0]?.finishReason;
           throw new Error(`Empty LLM response (finishReason=${finishReason ?? "unknown"})`);
         }
         try {

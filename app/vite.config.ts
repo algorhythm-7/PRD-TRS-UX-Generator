@@ -1,7 +1,7 @@
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
-import { GoogleGenerativeAI, type Content, type Part } from "@google/generative-ai";
+import { GoogleGenAI, type Content, type Part } from "@google/genai";
 import type { IncomingMessage, ServerResponse } from "http";
 
 interface TokenCache {
@@ -879,9 +879,9 @@ export interface GeminiCallConfig {
   structuredAttemptTimeoutMs: number;
 }
 
-function getGeminiClient(apiKey: string): GoogleGenerativeAI {
+function getGeminiClient(apiKey: string): GoogleGenAI {
   if (!apiKey) throw new Error("LLM_UNAVAILABLE");
-  return new GoogleGenerativeAI(apiKey);
+  return new GoogleGenAI({ apiKey });
 }
 
 function extractJsonBlock(text: string): unknown {
@@ -953,27 +953,25 @@ export async function callGemini(
             const last = requestContents[requestContents.length - 1];
             requestContents = [
               ...requestContents.slice(0, -1),
-              { ...last, parts: [...last.parts, { text: schemaPrompt }] },
+              { ...last, parts: [...(last.parts ?? []), { text: schemaPrompt }] },
             ];
           }
         }
 
-        const model = genAI.getGenerativeModel({
-          model: currentModelId,
-          systemInstruction,
-          generationConfig,
-        });
-
         const timeoutMs = attempt.withSchema ? config.structuredAttemptTimeoutMs : config.chatTimeoutMs;
         const result = await withTimeout(
-          model.generateContent({ contents: requestContents }),
+          genAI.models.generateContent({
+            model: currentModelId,
+            contents: requestContents,
+            config: { ...generationConfig, systemInstruction },
+          }),
           timeoutMs,
           "Gemini request",
         );
 
-        const text = result.response.text();
+        const text = result.text;
         if (!text?.trim()) {
-          const finishReason = result.response.candidates?.[0]?.finishReason;
+          const finishReason = result.candidates?.[0]?.finishReason;
           throw new Error(`Empty LLM response (finishReason=${finishReason ?? "unknown"})`);
         }
         try {

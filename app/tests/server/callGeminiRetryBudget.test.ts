@@ -1,16 +1,15 @@
 // @vitest-environment node
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-// Mocks @google/generative-ai so callGemini's retry loop can be exercised without a real network
-// call. Every attempt is made to fail, which is the worst case the retry-budget cap protects
-// against (docs/prompts.txt: uncapped retries could fan out to 4 models * 2 attempts = 8 real
-// Gemini calls per failing request).
+// Mocks @google/genai so callGemini's retry loop can be exercised without a real network call.
+// Every attempt is made to fail, which is the worst case the retry-budget cap protects against
+// (docs/prompts.txt: uncapped retries could fan out to 4 models * 2 attempts = 8 real Gemini calls
+// per failing request).
 const generateContentMock = vi.fn();
-const getGenerativeModelMock = vi.fn(() => ({ generateContent: generateContentMock }));
 
-vi.mock("@google/generative-ai", () => ({
-  GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
-    getGenerativeModel: getGenerativeModelMock,
+vi.mock("@google/genai", () => ({
+  GoogleGenAI: vi.fn().mockImplementation(() => ({
+    models: { generateContent: generateContentMock },
   })),
 }));
 
@@ -39,7 +38,6 @@ const jsonSchemaResponseFormat = {
 describe("callGemini retry budget", () => {
   beforeEach(() => {
     generateContentMock.mockReset();
-    getGenerativeModelMock.mockClear();
     generateContentMock.mockRejectedValue(new Error("simulated Gemini failure"));
   });
 
