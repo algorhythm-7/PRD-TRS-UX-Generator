@@ -78,7 +78,7 @@ behavior continues to work unchanged when a user never touches either feature.
   "how the document is rendered" — the exact seam needed to add new formats.
 - `DOC_TYPE_GUIDANCE` + `buildGenerateSystemPrompt` (backend) already isolate "prompt guidance
   text" from "prompt assembly" — the exact seam needed to add per-format guidance blocks.
-- The gap-analysis endpoint already demonstrates the "send text to Calypso, get back a small
+- The gap-analysis endpoint already demonstrates the "send text to Cluster, get back a small
   structured JSON result via `response_format`" pattern this plan reuses for template-section
   extraction (§3.5) — no new backend pattern is introduced, only a new instance of an existing one.
 - `OutputView`'s existing `edits` state (keyed by `DocType`, defaulting to `activeDoc.content`) is
@@ -273,11 +273,11 @@ One `FORMAT_GUIDANCE` entry per named format (9 total), each condensed from the 
 the file via the standard `File.text()` API (no library needed), sends the raw text to a new
 endpoint.
 
-**Phase 2 (documented, not built this round)**: `.docx` support via Calypso's own existing
+**Phase 2 (documented, not built this round)**: `.docx` support via Cluster's own existing
 capabilities — either the multimodal-tagged `vllm-qwen36-35b-a3b` model or the already-available
 `middlewareai-mineru` OCR service — so no new *dependency* is ever needed for this pipeline, only a
-different Calypso app target once Phase 2 is prioritized. This deliberately reuses the same
-"Calypso already hosts what we need" reasoning as the document-ingestion pillar (§10.2).
+different Cluster app target once Phase 2 is prioritized. This deliberately reuses the same
+"Cluster already hosts what we need" reasoning as the document-ingestion pillar (§10.2).
 
 **New endpoint**: `POST /_api/template-extract`
 
@@ -285,7 +285,7 @@ different Calypso app target once Phase 2 is prioritized. This deliberately reus
 - **Response**: `{ sections: string[] }`
 - **Auth**: none beyond what already protects `/_api/*` (XYZ-injected Bearer token via the
   existing proxy — no new auth surface).
-- **Behavior**: identical pattern to `handleGapAnalysis` — one `callCalypso` call with a small,
+- **Behavior**: identical pattern to `handleGapAnalysis` — one `callCluster` call with a small,
   purpose-built system prompt ("Extract an ordered list of section/heading names from this
   requirements/product template. Return only section names, no content, no numbering.") and a
   `response_format` JSON schema of `{ type: "object", properties: { sections: { type: "array",
@@ -355,7 +355,7 @@ in local `edits` state and visible in the live Markdown preview pane — but an 
 it's only used for export, and is discarded the moment the user regenerates or navigates away.
 
 Added this round: a **"Regenerate with my edits" action** that sends the original LLM output, the
-user's edited version, and an optional free-text comment back to Calypso as a learning signal for a
+user's edited version, and an optional free-text comment back to Cluster as a learning signal for a
 fresh generation — plus a lightweight per-section 👍/👎 control that adjusts how strongly the next
 regeneration should preserve vs. rewrite each section.
 
@@ -395,14 +395,14 @@ postGenerate(...) — same endpoint as initial generation, extended request body
   ↓
 POST /_api/generate — same handler, extended system/user prompt (§4.4)
   ↓
-callCalypso(...) — same helper, no change
+callCluster(...) — same helper, no change
   ↓
 Response replaces `documents[docType]` with fresh `{ ...doc, source: "llm" }`
   (same replace-on-regenerate behavior OutputView already has via its `useEffect` on `documents`)
 ```
 
 No new endpoint is introduced for regeneration — it reuses `POST /_api/generate` with additional
-optional request fields, since the underlying operation (call Calypso, get sections back, wrap as
+optional request fields, since the underlying operation (call Cluster, get sections back, wrap as
 `{ sections }`) is unchanged; only the **prompt content** differs.
 
 ### 4.4 Contract and prompt changes
@@ -433,8 +433,8 @@ consistent with how `clarifications` is already appended today):
 > --- USER'S EDITED VERSION ---
 > `<editedContent>`"
 
-This reuses the existing single-call `callCalypso` request/response shape entirely — no new
-Calypso contract, no new timeout/model-selection logic, no new response schema (still
+This reuses the existing single-call `callCluster` request/response shape entirely — no new
+Cluster contract, no new timeout/model-selection logic, no new response schema (still
 `generateSchema(sections)`).
 
 ### 4.5 UI changes
@@ -459,7 +459,7 @@ Calypso contract, no new timeout/model-selection logic, no new response schema (
 
 ### 4.6 Failure behavior
 
-Identical to today's generation failure behavior: if `callCalypso` throws, `handleGenerate`
+Identical to today's generation failure behavior: if `callCluster` throws, `handleGenerate`
 responds `503 LLM_UNAVAILABLE`, and `generateOne`'s existing `catch` falls back to the
 deterministic builder — **except** deterministic fallback obviously cannot honor `priorAttempt`
 (it has no LLM to give feedback to). In that case, `generateOne` falls back to the deterministic
@@ -498,7 +498,7 @@ like today's `edits` state already is).
 - **Response**: unchanged (`{ sections: Record<string, string> }`).
 - **Backward compatibility**: a request omitting all three new fields produces byte-identical
   behavior to today.
-- **Errors**: unchanged (`503 { error: "LLM_UNAVAILABLE" }` on any Calypso failure).
+- **Errors**: unchanged (`503 { error: "LLM_UNAVAILABLE" }` on any Cluster failure).
 
 ### `POST /_api/template-extract` (new)
 
@@ -516,8 +516,8 @@ like today's `edits` state already is).
 
 | Failure | Behavior |
 |---|---|
-| Calypso unavailable during `template-extract` | `503`; UI shows inline error, keeps "Standard" selected, does not guess |
-| Calypso unavailable during generate-with-`priorAttempt` | `503`; `generateOne` falls back to deterministic content; UI explicitly says feedback wasn't incorporated (§4.6) |
+| Cluster unavailable during `template-extract` | `503`; UI shows inline error, keeps "Standard" selected, does not guess |
+| Cluster unavailable during generate-with-`priorAttempt` | `503`; `generateOne` falls back to deterministic content; UI explicitly says feedback wasn't incorporated (§4.6) |
 | User uploads a non-`.txt`/`.md` file (Phase 1) | Client-side validation rejects before any network call, same `alert alert--error` pattern already used for other `InputForm` validation |
 | User selects a format not applicable to a `DocType` (shouldn't be reachable via UI, but defensive) | `sectionNamesFor` falls through to that `DocType`'s Standard sections rather than throwing, so a stray/invalid combination degrades to safe default instead of crashing |
 | Extracted custom template returns an empty `sections` array | Treated as an extraction failure (same `503`-style UI message), not silently generating a document with zero sections |
@@ -527,7 +527,7 @@ like today's `edits` state already is).
 ## 8. Security and Privacy
 
 - `template-extract` sends user-uploaded **template structure text** (not product/business
-  content) to Calypso — same trust boundary as the existing gap-analysis/generate calls, which
+  content) to Cluster — same trust boundary as the existing gap-analysis/generate calls, which
   already send `productDetails` to the same internal, VPC-only cluster; no new data-sensitivity
   category is introduced.
 - No new persistent storage of any user content (matches §10.3's client-side-only decision) — so no
@@ -554,8 +554,8 @@ Ordered by dependency; each is independently reviewable.
    supplied; new tests asserting the guidance text changes per format.
 3. **`/_api/template-extract` endpoint**: add to both `server.mjs` and `vite.config.ts`, following
    the `handleGapAnalysis` pattern exactly. *Validates*: new contract test for request/response
-   shape; manual live-verification against real Calypso (per this session's established pattern of
-   live-testing new Calypso-backed endpoints before considering them done).
+   shape; manual live-verification against real Cluster (per this session's established pattern of
+   live-testing new Cluster-backed endpoints before considering them done).
 4. **`llmClient.ts`**: add `postTemplateExtract`, extend `GenerateRequest` with `format`,
    `requirementPhrasing`, `priorAttempt`. *Validates*: `tests/web/client.test.ts`-equivalent unit
    tests for the new function; existing tests unaffected.
@@ -588,7 +588,7 @@ pillars are picked up:
 ### 10.1 Pillar 1 — Creativity/Temperature Control
 
 **Superseded** — fully architected in [`docs/Enhancements3.md`](./Enhancements3.md) §3
-("Innovation Assistance", per-document-type, 5 levels, mapped to Calypso's `temperature` parameter
+("Innovation Assistance", per-document-type, 5 levels, mapped to Cluster's `temperature` parameter
 plus per-level prompt instructions). The original directional recommendation here (a simple
 4-preset Conservative/Balanced/Innovative/Experimental control) was superseded by the richer,
 user-specified design in that document.
@@ -597,12 +597,12 @@ user-specified design in that document.
 
 **Superseded** — fully architected in [`docs/Enhancements4.md`](./Enhancements4.md) §4 (a
 phased plan: `.txt`/`.md` now, `.docx` via a new `mammoth` dependency next, `.pdf`/scanned
-documents via Calypso's OCR/multimodal apps last). The directional recommendation below is the
+documents via Cluster's OCR/multimodal apps last). The directional recommendation below is the
 same one that document builds on, not a contradiction:
 
 Directional recommendation (from earlier analysis in this conversation): native per-filetype
 extraction (previously called "Option C" — rejected convert-to-PDF and convert-to-images
-alternatives as unnecessary indirection), reusing Calypso's already-available
+alternatives as unnecessary indirection), reusing Cluster's already-available
 `vllm-qwen36-35b-a3b` (multimodal-tagged) and `middlewareai-mineru` (OCR) apps — no new external
 dependency needed for the OCR/multimodal phase, matching the same reasoning already applied to
 custom-template Phase 2 in §3.5.

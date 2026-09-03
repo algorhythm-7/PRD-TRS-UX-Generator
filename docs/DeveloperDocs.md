@@ -13,7 +13,7 @@ prior exposure to the codebase.
 **Purpose.** SpecPilot is a web application that generates professional-standard product
 documentation — a **Product Requirements Document (PRD)**, a **Technical Requirements
 Specification (TRS)**, and/or **UX Design Mockups (UX)** — from a short product description, using
-an internal LLM cluster ("Calypso") when available, with a deterministic offline fallback when it
+an internal LLM cluster ("Cluster") when available, with a deterministic offline fallback when it
 is not.
 
 **Primary use case.** A user (product manager, engineer, or designer) types a product title and a
@@ -34,9 +34,9 @@ full Markdown documents they can edit inline, regenerate with feedback, and expo
 
 **High-level architecture.** A single-page React 19 + Vite 7 app (`app/src`) talks only to its own
 same-origin Express server (production: `app/server.mjs`) or Vite dev-server plugin (development:
-`app/vite.config.ts`) via `/_api/*` routes. That server is a **self-contained Calypso LLM
+`app/vite.config.ts`) via `/_api/*` routes. That server is a **self-contained Cluster LLM
 gateway**: it holds every prompt-construction function, JSON-schema definition, and the
-OpenAI-compatible chat-completions client for the internal Calypso cluster, in one file (by
+OpenAI-compatible chat-completions client for the internal Cluster cluster, in one file (by
 necessity — see §2). There is no separate configured backend microservice in the OAuth-proxy
 sense the AGENTS.md template describes; `BACKEND_URL`/OAuth proxying code exists in `server.mjs`
 for any *other* `/_api/*` paths but is unused by SpecPilot's own feature set today.
@@ -84,7 +84,7 @@ Both files implement:
 - The `/_api/gap-analysis`, `/_api/generate`, `/_api/template-extract`, `/_api/context-extract`,
   `/_api/llm-status`, `/_api/llm-warmup` routes (§13).
 - The full prompt-construction pipeline (`buildGenerateSystemPrompt` and its guidance tables, §6).
-- The Calypso HTTP client (`callCalypso`/`callCalypsoChat`, §14).
+- The Cluster HTTP client (`callCluster`/`callClusterChat`, §14).
 
 `server.mjs` additionally implements (present only in production, not relevant to Vite dev):
 - `/env-config.js` — serves a runtime-generated env-var script (see AGENTS.md's XYZ template
@@ -106,7 +106,7 @@ sequenceDiagram
     participant GP as GenerationProfileScreen
     participant App as App.tsx
     participant API as /_api/* (server.mjs / vite.config.ts)
-    participant Cal as Calypso cluster
+    participant Cal as Cluster cluster
 
     U->>IF: fill title/details/types, click Continue
     IF->>App: onContinue(request)
@@ -149,7 +149,7 @@ from past choices.
 
 See §10 in full. In summary: `App.tsx` → `llmGenService.runGeneration` → one `generateOne()` call
 per selected DocType (in parallel, via `Promise.all`) → `llmClient.postGenerate` →
-`/_api/generate` → `buildGenerateSystemPrompt` → `callCalypso` → response parsed and reconstructed
+`/_api/generate` → `buildGenerateSystemPrompt` → `callCluster` → response parsed and reconstructed
 into a `GeneratedDocument` via `sectionSchema.buildGeneratedDocument`. Any single DocType's failure
 falls back to that DocType's deterministic generator (`prdGen.ts`/`trsGen.ts`/`uxGen.ts`) — one
 DocType falling back **never** affects the others (each `generateOne` call has its own
@@ -158,7 +158,7 @@ independent `try`/`catch`).
 ### 2.7 Clarification pipeline
 
 See §9 in full. `App.tsx.startGeneration` calls `runGapAnalysis` (which itself never throws — any
-failure there is treated as "zero questions") **before** the real generation call. If Calypso
+failure there is treated as "zero questions") **before** the real generation call. If Cluster
 returns 1+ questions, the flow pauses at `ClarificationQuestions`; answering or explicitly
 skipping both lead to the same `finishGeneration` call, the only difference being whether
 `clarifications` is populated.
@@ -174,7 +174,7 @@ the user message server-side (`buildPriorAttemptBlock`) — the system prompt it
 
 See §12.5. `App.tsx.finishGeneration` calls `sessionMemory.appendSessionRecord` exactly once, right
 after a successful generation (LLM **or** fallback — it logs the *chosen configuration*, not
-whether Calypso was reachable). `App.tsx.onContentChange`/`onSectionThumbsDown` then live-patch
+whether Cluster was reachable). `App.tsx.onContentChange`/`onSectionThumbsDown` then live-patch
 that same, most-recently-appended record's `editedSectionCount`/`thumbsDownSectionCount` fields as
 the user interacts with the output. `SessionHistoryPanel` is a pure, read-only view over
 `loadSessionMemoryStore()`, re-read every time the `<details>` panel is toggled open.
@@ -185,7 +185,7 @@ the user interacts with the output. `SessionHistoryPanel` is a pure, read-only v
 
 ```
 app/
-  server.mjs           Production Express server: Calypso gateway + static file server + OAuth proxy (§2.2)
+  server.mjs           Production Express server: Cluster gateway + static file server + OAuth proxy (§2.2)
   vite.config.ts        Dev-mode mirror of server.mjs's /_api/* routes, via a Vite plugin
   index.html             SPA shell; loads /src/main.tsx
   src/
@@ -400,7 +400,7 @@ selected DocType**, each independently configurable.
   `suggest_missing`, `challenge_assumptions`, `explore_alternatives`, `maximum_ideation`.
 - **Default:** `disabled`.
 - **Purpose/actual effect — verified in code (`INNOVATION_ASSISTANCE` map in `server.mjs`):** each
-  level pairs **both** a distinct prompt instruction **and** a distinct Calypso
+  level pairs **both** a distinct prompt instruction **and** a distinct Cluster
   `temperature` value:
 
   | Level | Temperature | Guidance summary |
@@ -413,7 +413,7 @@ selected DocType**, each independently configurable.
 
   **Accuracy note (fixed):** the `INNOVATION_ASSISTANCE` map's code comment previously (and
   incorrectly) claimed temperature wasn't wired in yet — this has been corrected; `handleGenerate`
-  does compute `temperature` from `innovationAssistance` and pass it into `callCalypso`. (It is
+  does compute `temperature` from `innovationAssistance` and pass it into `callCluster`. (It is
   **not** applied to `/_api/gap-analysis` or `/_api/template-extract`, which never pass a
   `temperature` argument at all.)
   **Grounding safeguard:** since a raised temperature affects the model's writing throughout the
@@ -565,14 +565,14 @@ InputForm's Continue button).
   `<input type="file" accept=".txt,.md,.docx">`. On change,
   `handleCustomTemplateUpload(docType, file)` runs.
 - **Extraction flow:** `readFileAsText(file)` — for `.docx`, uses `mammoth.extractRawText`
-  client-side (no server round-trip, no Calypso token spend for this step); for `.txt`/`.md`, uses
+  client-side (no server round-trip, no Cluster token spend for this step); for `.txt`/`.md`, uses
   `File.text()`. The resulting raw text is then POSTed to `/_api/template-extract` as
   `{ docType, rawText }`.
 - **Section extraction behavior (server-side):** a small, purpose-built system prompt ("Extract an
   ordered list of section/heading names from this requirements/product template. Return only
-  section names, no content, no numbering.") is sent to Calypso with a strict JSON schema
+  section names, no content, no numbering.") is sent to Cluster with a strict JSON schema
   (`{ sections: string[] }`). **There is no deterministic fallback for this endpoint** — if
-  Calypso is unreachable, `/_api/template-extract` returns `503 { error: "LLM_UNAVAILABLE" }` and
+  Cluster is unreachable, `/_api/template-extract` returns `503 { error: "LLM_UNAVAILABLE" }` and
   the UI shows `"Couldn't read your template - try again or use a Standard format."`.
 - **Deduplication logic:** none at the template-extraction step itself — the extracted section
   list is stored as-is. Deduplication only happens later, in the Output Structure checkboxes
@@ -620,12 +620,12 @@ InputForm's Continue button).
   - `.docx` → `mammoth.extractRawText` client-side → plain text.
   - `.txt`/`.md` → `File.text()` client-side → plain text.
   - For non-PDF cases, the extracted/raw text is then POSTed to `/_api/context-extract` as
-    `{ filename, rawText }` — this path makes **no Calypso call at all**; the server only enforces
+    `{ filename, rawText }` — this path makes **no Cluster call at all**; the server only enforces
     a character budget (`CONTEXT_EXTRACT_CHAR_LIMIT`, default 8000 chars **per document**) and
     returns `{ extractedText, truncated }`.
 - **PDF handling in detail:** `.pdf` uploads are base64-encoded and sent as an OpenAI-style
   `image_url` content block (`data:application/pdf;base64,<...>`) in a chat-completions call to
-  the `vllm-qwen36-35b-a3b` Calypso candidate, using a strict JSON schema
+  the `vllm-qwen36-35b-a3b` Cluster candidate, using a strict JSON schema
   (`{ extractedText: string }`), max 8192 tokens. **This is explicitly marked `UNVERIFIED` in the
   code's own comment**: there is no documented request/response contract for sending a PDF this
   way to this specific deployment, and the code comment states a real PDF upload is needed to
@@ -633,7 +633,7 @@ InputForm's Continue button).
   PDF returned `200 OK` with an **empty** `extractedText`.
 - **DOCX handling:** entirely client-side via the `mammoth` npm package (no official TypeScript
   types exist for it — `app/src/mammoth.d.ts` provides a minimal ambient declaration). No server
-  round-trip, no Calypso token spend.
+  round-trip, no Cluster token spend.
 - **Context injection process:** on the client, extracted text is appended to a shared
   `referenceDocuments: string[]` array (capped at the most recent 3 via `.slice(-3)`) or stored as
   the single `styleExample` string. Both are bundled into one `referenceContent` object
@@ -652,7 +652,7 @@ InputForm's Continue button).
     and level of detail."
 - **Failure behavior:** any extraction failure (thrown exception anywhere in
   `extractTextFromUpload`) is caught and shown as `"Couldn't read <filename> - try again."` via a
-  shared `contextError` alert. **PDF-specific failure**: if Calypso itself is unreachable during
+  shared `contextError` alert. **PDF-specific failure**: if Cluster itself is unreachable during
   PDF extraction, `/_api/context-extract` returns `503 { error: "LLM_UNAVAILABLE" }` — this is the
   one context-extract failure mode that is a genuine "LLM down" condition rather than a client bug,
   per the code's own comment.
@@ -682,7 +682,7 @@ InputForm's Continue button).
   screen's Generate button) unconditionally calls `runGapAnalysis` first, **before** any actual
   document generation happens.
 - **Generation process:** `runGapAnalysis` POSTs `{ productTitle, productDetails, selectedTypes,
-  answers }` to `/_api/gap-analysis`. Server-side, a single Calypso chat-completions call is made
+  answers }` to `/_api/gap-analysis`. Server-side, a single Cluster chat-completions call is made
   with a system prompt instructing the model to identify up to 5 gaps that would prevent writing
   testable requirements/personas/NFRs, using a strict JSON schema capping the array at 5 items. If
   the input is already sufficient, the model is explicitly instructed to return an empty list.
@@ -701,7 +701,7 @@ InputForm's Continue button).
   `clarifications`) — it only affects the **user message** content
   (`JSON.stringify({ productTitle, productDetails, answers, clarifications, sections, ... })`).
 - **Failure behavior (important):** `runGapAnalysis` has a bare `catch { return [] }` — **any**
-  failure (Calypso down, network error, malformed response) is silently treated as "zero
+  failure (Cluster down, network error, malformed response) is silently treated as "zero
   questions", and the flow proceeds straight to `finishGeneration` with no user-visible error and
   no distinction from the "nothing to ask" case. This was a deliberate design choice per its own
   code comment ("Gap analysis is a nice-to-have... never blocks generation").
@@ -738,15 +738,15 @@ InputForm's Continue button).
    sections, be specific, never repeat the caller-added `##` heading).
    The user message is `JSON.stringify({ productTitle, productDetails, answers, clarifications,
    sections, priorAttemptContext? })`.
-   `callCalypso(messages, generateSchema(sections), CALYPSO_GENERATE_MAX_TOKENS, temperature)` then:
+   `callCluster(messages, generateSchema(sections), Cluster_GENERATE_MAX_TOKENS, temperature)` then:
    - Checks every configured candidate model's live `/cmd/state` (in parallel); any `ONLINE`
      candidate is raced via `Promise.any` (first success wins); any `STOP` candidate is
      fire-and-forget triggered to start (for next time, not this request).
    - Each candidate attempt itself first tries a structured `response_format` JSON-schema call
-     (bounded by `CALYPSO_STRUCTURED_ATTEMPT_TIMEOUT_MS`, default 20s); on failure, retries once
+     (bounded by `Cluster_STRUCTURED_ATTEMPT_TIMEOUT_MS`, default 20s); on failure, retries once
      with a plain-JSON instruction appended as a `user` message (bounded by
-     `CALYPSO_CHAT_TIMEOUT_MS`, default 90s).
-   - The whole race is bounded by `CALYPSO_TOTAL_TIMEOUT_MS` (default 115s) as a final safety net.
+     `Cluster_CHAT_TIMEOUT_MS`, default 90s).
+   - The whole race is bounded by `Cluster_TOTAL_TIMEOUT_MS` (default 115s) as a final safety net.
    - If **no** candidate is `ONLINE`, or all racing candidates fail, or the race times out, a
      `LlmUnavailableError` propagates up.
 7. **Response handling:** on success, `generateSchema(sections)`'s strict JSON schema guarantees
@@ -757,7 +757,7 @@ InputForm's Continue button).
    `#` title, then one `## <n>. <section name>` heading per section (PRD/TRS) or `## <section
    name>` (UX, no numbering), each followed by that section's returned text. The result is tagged
    `source: "llm"`.
-9. **Fallback path:** if **any** step in 5–8 throws (network error, Calypso unavailable, schema
+9. **Fallback path:** if **any** step in 5–8 throws (network error, Cluster unavailable, schema
    violation, etc.), `generateOne`'s outer `try/catch` swallows it and instead calls
    `buildDeterministic(docType, input)` — the fully offline, template-string generator
    (`prdGen.ts`/`trsGen.ts`/`uxGen.ts`) using only `productTitle`/`productDetails`/`selectedTypes`
@@ -822,7 +822,7 @@ orchestrated by `App.tsx`.
   whenever `documents` changes identity — this fires for **every** regeneration, even a
   single-DocType one, since `documents` is a new array reference each time.
 - **Fallback-specific behavior:** if a regeneration itself falls back to the deterministic
-  generator (Calypso down at that moment), `regenerateFallbackFor` is set to that DocType, and
+  generator (Cluster down at that moment), `regenerateFallbackFor` is set to that DocType, and
   `OutputView` is expected to render a distinct message (props exist for this: `regenerateFallbackFor`
   is passed through) — **note:** the deterministic fallback generator cannot honor `priorAttempt`
   at all (it only ever reads `productTitle`/`productDetails`/`selectedTypes`), so a
@@ -948,7 +948,7 @@ All routes are same-origin `/_api/*`, registered identically (by hand) in both `
   answers?: Record<string,string> }`
 - **Response body (200):** `{ questions: Array<{ id: string, question: string, relatedField?:
   string }> }` (max 5 items, enforced by JSON schema)
-- **Error cases:** `503 { error: "LLM_UNAVAILABLE" }` if Calypso is down/times out/returns
+- **Error cases:** `503 { error: "LLM_UNAVAILABLE" }` if Cluster is down/times out/returns
   malformed data. **Client never sees this as an error** — `llmGenService.runGapAnalysis` catches
   everything and returns `[]`.
 - **Consumers:** `llmClient.postGapAnalysis` ← `llmGenService.runGapAnalysis` ← `App.startGeneration`.
@@ -990,15 +990,15 @@ All routes are same-origin `/_api/*`, registered identically (by hand) in both `
 - **Response body (200):** `{ extractedText: string, truncated: boolean }` — `truncated` is true
   if the text exceeded `CONTEXT_EXTRACT_CHAR_LIMIT` (default 8000 chars) and was cut off.
 - **Error cases:** `503 { error: "LLM_UNAVAILABLE" }` **only** for the `base64Content` (PDF) path,
-  when the multimodal Calypso call fails. The plain-text path never calls Calypso, so it cannot
+  when the multimodal Cluster call fails. The plain-text path never calls Cluster, so it cannot
   fail this way (any failure there would be a genuine server bug, not an LLM-availability issue).
 - **Consumers:** `llmClient.postContextExtract` / `postContextExtractBinary` ←
   `GenerationProfileScreen.handleReferenceDocumentUpload` / `handleStyleExampleUpload`.
 
 ### `GET /_api/llm-status`
 - **Response body (200):** `{ ready: boolean, primary: { app: string | null, state: string } }` —
-  `ready` is `true` iff the **first** entry in `CALYPSO_MODEL_CANDIDATES` (default
-  `vllm-glm-52`) currently reports Calypso state `"ONLINE"`. This does **not** reflect whether any
+  `ready` is `true` iff the **first** entry in `Cluster_MODEL_CANDIDATES` (default
+  `vllm-glm-52`) currently reports Cluster state `"ONLINE"`. This does **not** reflect whether any
   *other* candidate is online — the app can still successfully generate via a fallback candidate
   while `ready: false` is reported.
 - **Consumers:** `llmClient.getLlmStatus`, polled every 20s (`LLM_STATUS_POLL_MS`) by `App.tsx`'s
@@ -1006,7 +1006,7 @@ All routes are same-origin `/_api/*`, registered identically (by hand) in both `
   banner.
 
 ### `POST /_api/llm-warmup`
-- **Response body (202):** `{ triggered: boolean }` — fire-and-forget; triggers a Calypso `/cmd/start`
+- **Response body (202):** `{ triggered: boolean }` — fire-and-forget; triggers a Cluster `/cmd/start`
   for the primary candidate only, regardless of its current state.
 - **Consumers:** `llmClient.triggerLlmWarmup`, called once on `App.tsx` mount.
 
@@ -1023,43 +1023,43 @@ All routes are same-origin `/_api/*`, registered identically (by hand) in both `
 
 **File:** `server.mjs` / `vite.config.ts` (identical logic).
 
-- **Calypso integration:** an internal-only cluster reached at `CALYPSO_BASE_URL` (default
-  `https://apps.services.calypso.intra.chrysler.com`) over HTTPS with certificate validation
+- **Cluster integration:** an internal-only cluster reached at `Cluster_BASE_URL` (default
+  `https://apps.services.Cluster.intra.chrysler.com`) over HTTPS with certificate validation
   **disabled** for this specific `https.Agent` only (`rejectUnauthorized: false`) — the code
-  comment explains Calypso's certificate is self-signed and this is an internal-only host, and
+  comment explains Cluster's certificate is self-signed and this is an internal-only host, and
   explicitly scopes the bypass to this one agent rather than weakening TLS validation
   process-wide. No API key is used — access is controlled purely by network location (VPC-only).
-- **Model selection:** `CALYPSO_MODEL_CANDIDATES` (overridable via `CALYPSO_MODEL_CANDIDATES` env
+- **Model selection:** `Cluster_MODEL_CANDIDATES` (overridable via `Cluster_MODEL_CANDIDATES` env
   var as JSON), defaulting to 3 candidates in priority order:
   1. `vllm-glm-52` (`cyankiwi/GLM-5.2-AWQ-INT4`) — the "primary" for `/_api/llm-status` purposes.
   2. `vllm-qwen36-35b-a3b` (`Qwen/Qwen3.6-35B-A3B`) — also the one used for PDF multimodal
      extraction specifically.
   3. `vllm-gpt-oss-120b` (`openai/gpt-oss-120b`).
 - **Candidate selection at request time:** every configured candidate's live state is queried via
-  Calypso's `/cmd/state?application=<app>` (bounded by `CALYPSO_STATE_TIMEOUT_MS`, default 10s,
+  Cluster's `/cmd/state?application=<app>` (bounded by `Cluster_STATE_TIMEOUT_MS`, default 10s,
   and a **hard deadline timer** rather than a socket-inactivity timer — the code comment notes a
   real observed bug where periodic keep-alive bytes defeated a naive inactivity timeout and hung
   far past its intended limit). Any `ONLINE` candidate is added to the race; any `STOP` candidate
   is fire-and-forget triggered to start via `/cmd/start` (for a *future* request, never blocking
   the current one).
-- **Fallback behavior (model-unavailable):** if zero candidates are `ONLINE`, `callCalypso` throws
+- **Fallback behavior (model-unavailable):** if zero candidates are `ONLINE`, `callCluster` throws
   `LlmUnavailableError` immediately — no retry loop across states, since a `STOP`→`ONLINE`
   transition can take 4-5 minutes (cold start) and blocking on that would defeat the purpose of
   racing multiple candidates.
-- **Retry behavior (per-candidate):** `callCalypsoChat` attempts the request twice per candidate
+- **Retry behavior (per-candidate):** `callClusterChat` attempts the request twice per candidate
   *only if* a JSON schema (`responseFormat`) was supplied: first with the schema passed as
   `response_format` (structured output — unconfirmed whether the vLLM deployment truly supports
-  this, hence the short `CALYPSO_STRUCTURED_ATTEMPT_TIMEOUT_MS` = 20s bound), then, on **any**
+  this, hence the short `Cluster_STRUCTURED_ATTEMPT_TIMEOUT_MS` = 20s bound), then, on **any**
   failure of that first attempt, a second attempt appends the schema as plain instructional text
   in an additional `user`-role message (not `system` — a code comment notes at least one
   deployment, `vllm-qwen36-35b-a3b`, rejects a second system message outright) and relies on
   defensive parsing (`JSON.parse`, then `extractJsonBlock` as a fallback that strips ` ```json `
   fences and slices between the first `{` and last `}`), bounded by the longer
-  `CALYPSO_CHAT_TIMEOUT_MS` = 90s.
+  `Cluster_CHAT_TIMEOUT_MS` = 90s.
 - **Racing multiple candidates:** all currently-`ONLINE` candidates are attempted **simultaneously**
-  via `Promise.any` (first success wins) — this deliberately trades some duplicate Calypso compute
+  via `Promise.any` (first success wins) — this deliberately trades some duplicate Cluster compute
   for better worst-case latency/reliability, per its own code comment, bounded overall by
-  `CALYPSO_TOTAL_TIMEOUT_MS` (default 115s).
+  `Cluster_TOTAL_TIMEOUT_MS` (default 115s).
 - **Error handling:** any HTTP non-2xx response is inspected for text matching
   `/context length|maximum context|too many tokens|token limit/i` and flagged distinctly in the
   thrown error message as "(possible context/token limit)". An empty `choices[0].message.content`
@@ -1067,7 +1067,7 @@ All routes are same-origin `/_api/*`, registered identically (by hand) in both `
   into the error message specifically to diagnose token-budget exhaustion (`finish_reason:
   "length"`).
 - **Per-endpoint token budgets:** gap-analysis 4096, generate 8192, template-extract 4096, PDF
-  extract 8192 (`CALYPSO_*_MAX_TOKENS` env vars, all overridable).
+  extract 8192 (`Cluster_*_MAX_TOKENS` env vars, all overridable).
 
 ---
 
@@ -1122,7 +1122,7 @@ top-level directory listings — that older layout is superseded by `app/tests/`
 - No test exercises the actual multi-field prompt **against a real LLM response** — server tests
   validate the constructed *prompt string*, not that a real model's output honors it. (The only
   evidence that reference-document/format guidance genuinely changes model output comes from a
-  manual live audit against the real Calypso cluster, not from the automated suite.)
+  manual live audit against the real Cluster cluster, not from the automated suite.)
 - No test covers the Session History **thumbs-down count** end-to-end (component →
   `sessionMemory` write → panel display) — this is exactly where a live audit found an unexplained
   discrepancy (§12.5).
@@ -1162,7 +1162,7 @@ for the preview content, and §8/§13 above for the upload-confirmation UI.)*
 - No client-side surfacing of the `truncated: true` flag `/_api/context-extract` can return.
 
 **Technical debt:**
-- `server.mjs` and `vite.config.ts` duplicate the **entire** prompt-construction/Calypso-client
+- `server.mjs` and `vite.config.ts` duplicate the **entire** prompt-construction/Cluster-client
   logic with zero code sharing, by necessity of the Docker build only copying `server.mjs` — any
   change to one must be manually, exactly mirrored in the other, or dev/prod will silently diverge.
 - Dead/unused scaffold files remain in the repo (`App-nex.tsx`, `routes/ApiExample.tsx`,
@@ -1176,7 +1176,7 @@ for the preview content, and §8/§13 above for the upload-confirmation UI.)*
   comment over the code would draw the wrong conclusion.
 
 **Assumptions carried by the implementation (not independently re-verified in this document):**
-- `CALYPSO_MODEL_CANDIDATES`' default 3-model list and their relative reliability, as implied by
+- `Cluster_MODEL_CANDIDATES`' default 3-model list and their relative reliability, as implied by
   the try-structured-then-plain-JSON retry strategy, reflects real prior debugging against the
   actual cluster (per in-code comments) rather than speculation — but this document did not
   re-verify every model's current behavior.
@@ -1188,14 +1188,14 @@ for the preview content, and §8/§13 above for the upload-confirmation UI.)*
 | Symptom | Cause | Resolution |
 |---|---|---|
 | "AI model is warming up..." banner shown, generation still works | `/_api/llm-status`'s primary candidate (`vllm-glm-52`) isn't `ONLINE` yet, but this doesn't block generation — the deterministic fallback (or another online candidate) is used in the meantime | Wait — the banner clears automatically once the 20s poll reports `ready: true`. No action needed; this is expected behavior, not a bug (confirmed live: it also appears briefly on every fresh page load before the first poll resolves). |
-| Every document comes back as fallback (`source: "fallback"`, visible banner: "Generated using the offline fallback") | All configured Calypso candidates are non-`ONLINE`, or every online candidate failed / timed out within `CALYPSO_TOTAL_TIMEOUT_MS` | Check `/_api/llm-status` and server logs (tagged `[calypso]`) for `getAppState`/`callCalypsoChat` failure messages; verify VPC network access to `CALYPSO_BASE_URL`; consider triggering `/_api/llm-warmup` and waiting for cold start (4-5 min). |
+| Every document comes back as fallback (`source: "fallback"`, visible banner: "Generated using the offline fallback") | All configured Cluster candidates are non-`ONLINE`, or every online candidate failed / timed out within `Cluster_TOTAL_TIMEOUT_MS` | Check `/_api/llm-status` and server logs (tagged `[Cluster]`) for `getAppState`/`callClusterChat` failure messages; verify VPC network access to `Cluster_BASE_URL`; consider triggering `/_api/llm-warmup` and waiting for cold start (4-5 min). |
 | Template/reference/style upload appears to do nothing | All three uploads (Custom Template, Reference Documents, Style Example) now show a confirmation message on success — if none appears, extraction genuinely failed | Check for the `contextError`/template-extract error alert text, and retry; if a confirmation *does* appear but looks empty or unexpectedly short, the source file may not have contained extractable text (common for scanned/image-only PDFs). |
-| "Couldn't read your template - try again or use a Standard format." | `/_api/template-extract` returned `503 LLM_UNAVAILABLE`, or the client-side file read (`mammoth`/`.text()`) threw | Retry once Calypso is reachable; verify the uploaded file is genuinely `.txt`/`.md`/`.docx` and not corrupted/empty. |
-| "Couldn't read `<filename>` - try again." (Context Sources) | Same as above but for reference/style uploads — additionally, `.pdf` uploads specifically fail this way only when the multimodal Calypso call itself fails (`LLM_UNAVAILABLE`) | For `.pdf` specifically, be aware extraction is unverified against real PDFs — an empty (not error) result is also a known possible outcome; check the actual generated output for whether the content was incorporated. |
+| "Couldn't read your template - try again or use a Standard format." | `/_api/template-extract` returned `503 LLM_UNAVAILABLE`, or the client-side file read (`mammoth`/`.text()`) threw | Retry once Cluster is reachable; verify the uploaded file is genuinely `.txt`/`.md`/`.docx` and not corrupted/empty. |
+| "Couldn't read `<filename>` - try again." (Context Sources) | Same as above but for reference/style uploads — additionally, `.pdf` uploads specifically fail this way only when the multimodal Cluster call itself fails (`LLM_UNAVAILABLE`) | For `.pdf` specifically, be aware extraction is unverified against real PDFs — an empty (not error) result is also a known possible outcome; check the actual generated output for whether the content was incorporated. |
 | Generated document ignores an uploaded reference document | Reference content is real but is deliberately instructed to be **non-authoritative "background context only"** — the model may legitimately choose not to feature it prominently, especially if it conflicts with `productDetails` | This is expected per the prompt's own framing ("do not copy their content verbatim or treat them as more authoritative than the product title/details above"); this is not a bug. |
 | "Regenerate with my edits" button never appears | `hasEdit` is only true when the textarea's current value differs from `activeDoc.content` — an edit that round-trips back to the exact original text (e.g. undo) won't show it | Make a real, retained edit; whitespace-only or reverted changes may not register as different. |
 | Session History count discrepancies (e.g. thumbs-down higher than expected) | A live, unresolved anomaly exists (§12.5/§17) — root cause not yet identified | Do not treat the displayed counts as guaranteed-precise; this is a known open issue. |
-| Empty generation / a section comes back blank | The model's `finish_reason` was likely `"length"` (hit `max_tokens` before finishing) or it returned malformed JSON that `extractJsonBlock` couldn't recover | Check server logs for the `[llm]`-tagged error including `finish_reason`/`usage`; consider raising the relevant `CALYPSO_*_MAX_TOKENS` env var. |
+| Empty generation / a section comes back blank | The model's `finish_reason` was likely `"length"` (hit `max_tokens` before finishing) or it returned malformed JSON that `extractJsonBlock` couldn't recover | Check server logs for the `[llm]`-tagged error including `finish_reason`/`usage`; consider raising the relevant `Cluster_*_MAX_TOKENS` env var. |
 | `/env-config.js` 404 in browser console during `npm run dev` | This route only exists in `server.mjs` (production); Vite's dev server has no equivalent route, and `index.html` unconditionally references the script | Harmless — ignore in development; only relevant if it also 404s in a *production* deployment, which would indicate a missing `ENV_CONFIG_FILE`/`dist/env-config.js` (see `docker-entrypoint.sh`). |
 
 ---

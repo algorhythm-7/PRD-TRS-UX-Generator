@@ -2790,7 +2790,7 @@ AI chatbot application using React with Atlas LLM. Includes streaming chat UI, a
 Streamlit Chat
 
 chatbot
-Streamlit chat application with Calypso LLM integration. Includes model selection, server lifecycle controls, and an example tool.
+Streamlit chat application with Cluster LLM integration. Includes model selection, server lifecycle controls, and an example tool.
 
 MCP:
 Python Service
@@ -3571,7 +3571,7 @@ This is what I'd aim for rather than simply bolting an LLM onto prdGen.ts:
 That's a real product architecture rather than just a template generator.
 
 14. One caution: don't add AI before you know what your platform supports
-This is particularly important because you mentioned Atlas LLM and Calypso LLM in the platform options.
+This is particularly important because you mentioned Atlas LLM and Cluster LLM in the platform options.
 
 Those names suggest your organization/platform may have internally managed AI infrastructure.
 
@@ -3586,7 +3586,7 @@ means your React/Node application can automatically call Atlas.
 We need to determine:
 
 Is Atlas available as an internal API?
-Is Calypso available to arbitrary applications?
+Is Cluster available to arbitrary applications?
 How does authentication work?
 Is there an SDK?
 What endpoint is used?
@@ -3618,7 +3618,7 @@ with no database/API template selected, provided the generated project can be re
 
 Don't rewrite the application just to match Mantine/OAuth.
 
-D. Find out what Atlas/Calypso actually provide
+D. Find out what Atlas/Cluster actually provide
 This could be extremely important for our eventual AI-assisted editing feature.
 
 E. Meanwhile, use Copilot to investigate the current repository
@@ -3725,7 +3725,7 @@ The React + Node.js + Mantine + OAuth template is the closest available option, 
 
 And architecturally, I strongly agree with your Mermaid idea. Editable Mermaid + editable structured text + AI-assisted section/diagram edits is a much better direction than generating static diagrams.
 
-The next thing I'd like to establish is what the Nexa platform actually expects from a Node/Docker application and what Atlas/Calypso are exposed as. Once we know that, we can design the deployment and AI layer around the platform instead of building something that later has to be ripped apart.
+The next thing I'd like to establish is what the Nexa platform actually expects from a Node/Docker application and what Atlas/Cluster are exposed as. Once we know that, we can design the deployment and AI layer around the platform instead of building something that later has to be ripped apart.
 
 
 

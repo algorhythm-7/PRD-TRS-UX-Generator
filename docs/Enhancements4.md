@@ -53,7 +53,7 @@ introduced except where explicitly flagged as needing further review (§5.4 only
   `Document`/`Packer`) — this is a write-only API; it does not parse/read existing `.docx` files,
   so Pillar 4's `.docx` ingestion (§3.1 Phase 2) still needs a different, new dependency.
 - `docs/Enhancements2.md` §3.5 already establishes the "Phase 1 = `.txt`/`.md` via `File.text()`,
-  zero new dependencies" pattern and the "Phase 2/3 = reuse Calypso's multimodal model / OCR
+  zero new dependencies" pattern and the "Phase 2/3 = reuse Cluster's multimodal model / OCR
   service" pattern — Pillar 4 reuses both patterns rather than inventing new ones.
 - `docs/Enhancements2.md` §4 (human-in-the-loop editing/feedback) and `docs/Enhancements3.md`
   (Generation Profile fields) are the two sources of signal Pillar 5 consolidates into learned
@@ -108,7 +108,7 @@ interface SessionRecord {
 **Deliberate scoping limit**: only *structured configuration choices* and *feedback counts* are
 recorded — never free-text comments (`docs/Enhancements2.md` §4.4/§4.5) and never edited document
 content itself. This is a client-side-only system with no LLM call available to it (adding one
-would mean sending session history to Calypso, a bigger, separate capability not designed here);
+would mean sending session history to Cluster, a bigger, separate capability not designed here);
 without an LLM, free text can't be reliably interpreted into a structured preference signal, so
 recording it here would either be misleading (implying it's used) or require building fragile
 client-side text heuristics. Free text remains fully visible per-session in the timeline (§3.8)
@@ -192,15 +192,15 @@ original notes without conflating it with the CRS/TRS requirement-ID traceabilit
 ### 4.1 Phased approach (recap and complete "Option C")
 
 `docs/Enhancements2.md` §10.2 already recommended native per-filetype extraction ("Option C" —
-rejecting convert-to-PDF and convert-to-images as unnecessary indirection) reusing Calypso's
+rejecting convert-to-PDF and convert-to-images as unnecessary indirection) reusing Cluster's
 already-available `vllm-qwen36-35b-a3b` (multimodal-tagged) and `middlewareai-mineru` (OCR)
 apps. This section completes that into a concrete phased plan:
 
 | Phase | File types | Mechanism | New dependency? |
 |---|---|---|---|
 | 1 (this round, buildable now) | `.txt`, `.md` | Client reads via `File.text()`, sends raw text to a new endpoint | None |
-| 2 | `.docx` | New client-side parsing dependency (e.g., `mammoth` — converts `.docx` to plain text; small, focused, widely used) — chosen over routing through Calypso for simple structured Office files, since `.docx` is a well-defined format a dedicated parser handles cheaply and locally, without spending LLM tokens or a network round-trip just to extract already-structured text. **Note**: this app's existing `docx` npm dependency is *write-only* (used for exporting, via `Document`/`Packer`) — it does not parse existing files, so this is a genuinely new capability, not a reuse of an existing one. | Yes — one small, justified addition |
-| 3 | `.pdf`, scanned/image-based documents | Server-side, routed to Calypso's `middlewareai-mineru` OCR service (for scanned/layout-heavy documents) or `vllm-qwen36-35b-a3b` (for straightforward digital PDFs a multimodal model can read directly) — mirrors `docs/Enhancements2.md` §3.5's Phase 2 reasoning exactly | None (reuses Calypso) |
+| 2 | `.docx` | New client-side parsing dependency (e.g., `mammoth` — converts `.docx` to plain text; small, focused, widely used) — chosen over routing through Cluster for simple structured Office files, since `.docx` is a well-defined format a dedicated parser handles cheaply and locally, without spending LLM tokens or a network round-trip just to extract already-structured text. **Note**: this app's existing `docx` npm dependency is *write-only* (used for exporting, via `Document`/`Packer`) — it does not parse existing files, so this is a genuinely new capability, not a reuse of an existing one. | Yes — one small, justified addition |
+| 3 | `.pdf`, scanned/image-based documents | Server-side, routed to Cluster's `middlewareai-mineru` OCR service (for scanned/layout-heavy documents) or `vllm-qwen36-35b-a3b` (for straightforward digital PDFs a multimodal model can read directly) — mirrors `docs/Enhancements2.md` §3.5's Phase 2 reasoning exactly | None (reuses Cluster) |
 
 ### 4.2 New endpoint: `POST /_api/context-extract`
 
@@ -214,19 +214,19 @@ only a *section-name list*; this one extracts *usable reference content*.
   so Phase 2/3 can share one client-side upload flow and response contract regardless of which
   phase's mechanism handled a given file type. Phase 2 (`.docx`, parsed client-side by `mammoth`
   before the call) also just budgets already-plain text server-side. Phase 3 (`.pdf`/images) is
-  the only phase where this endpoint actually calls Calypso (OCR/multimodal) to produce
+  the only phase where this endpoint actually calls Cluster (OCR/multimodal) to produce
   `extractedText` from non-text input.
 - **Failure behavior**: `503 { error: "LLM_UNAVAILABLE" }` only applies to Phase 3 (the only phase
-  that calls Calypso); Phase 1/2 failures are client-side validation errors (unsupported file
+  that calls Cluster); Phase 1/2 failures are client-side validation errors (unsupported file
   type, unreadable file), surfaced inline, same `alert alert--error` pattern as elsewhere.
 
 ### 4.3 Context budget (token management)
 
 Reference content is appended to the generate prompt (§5.3) alongside everything else
 (`docs/Enhancements2.md` and `docs/Enhancements3.md`'s guidance blocks, the product
-title/details, clarifications) — all sharing `CALYPSO_GENERATE_MAX_TOKENS` (8192, per
+title/details, clarifications) — all sharing `Cluster_GENERATE_MAX_TOKENS` (8192, per
 `docs/EnhancementBuildPlan2.md`'s existing constant). To avoid silently truncating a document
-mid-Calypso-call:
+mid-Cluster-call:
 
 - Each uploaded reference document is capped at **8,000 characters** client-side before being sent
   to `/_api/context-extract`; anything beyond that is dropped with `truncated: true` in the
@@ -315,7 +315,7 @@ whoever owns XYZ's network policy before this is implemented.
   `productTitle` plus a short, generic topic phrase — **never** the full `productDetails` text,
   which may contain confidential product information. This is the one meaningfully new trust
   boundary this app would introduce (every other network call in this app stays within Org's
-  internal VPC, per `AGENTS.md`/prior session notes on Calypso) — treated as a **Risk**, not a
+  internal VPC, per `AGENTS.md`/prior session notes on Cluster) — treated as a **Risk**, not a
   routine feature, in §8.
 - Top 3–5 results' `title`/`snippet` (not full page content — no new content-fetching/crawling
   capability) are appended to the generate prompt as: *"The following are public web search
@@ -431,7 +431,7 @@ On successful generation: append a new SessionRecord (§3.2) to SessionMemorySto
 | Concern | Handling |
 |---|---|
 | Session memory contents | Client-side `localStorage` only; only structured config + counts (§3.2), never free text or document content — bounded retention + explicit clear control (§3.7) |
-| Uploaded reference documents | Same trust boundary as existing template uploads (`docs/Enhancements2.md` §8) — content stays within the existing Calypso VPC boundary for Phase 3; Phases 1–2 never leave the browser/server pair already in the trust boundary |
+| Uploaded reference documents | Same trust boundary as existing template uploads (`docs/Enhancements2.md` §8) — content stays within the existing Cluster VPC boundary for Phase 3; Phases 1–2 never leave the browser/server pair already in the trust boundary |
 | **Web search (§5.4)** | **The one genuinely new external trust boundary this app would introduce.** Minimal-exposure query design (title + generic topic only, never full `productDetails`); explicit opt-in with a non-dismissible warning; **requires organizational security review before implementation** — this document does not treat it as approved, only designed |
 | Style-reference/reference-document content | Explicitly framed to the LLM as "reference, not literal output to copy" (§5.3), reducing the risk of unintentionally reproducing another product's or another team's confidential content verbatim in a new document |
 
@@ -443,7 +443,7 @@ On successful generation: append a new SessionRecord (§3.2) to SessionMemorySto
 |---|---|
 | Reference document exceeds the character budget (§4.3) | Truncated, `truncated: true` surfaced to the user — never silently dropped without indication |
 | `.docx` parsing fails client-side (Phase 2) | Inline error, same `alert alert--error` pattern; file simply isn't included, generation proceeds without it if the user continues |
-| Calypso unavailable during Phase 3 OCR/multimodal extraction | `503 LLM_UNAVAILABLE`; that document is excluded from `referenceContent` with an inline notice, generation still proceeds for the rest of the request |
+| Cluster unavailable during Phase 3 OCR/multimodal extraction | `503 LLM_UNAVAILABLE`; that document is excluded from `referenceContent` with an inline notice, generation still proceeds for the rest of the request |
 | Web search provider unavailable or not yet configured | Treated as a soft failure — omit web results from the prompt, surface a small inline notice, never block generation on it |
 | `localStorage` unavailable or quota exceeded (e.g., private browsing) | Session memory silently no-ops (no consolidated preferences, no history) — generation is entirely unaffected, since every consumer of `SessionMemoryStore` already treats "no sessions" as a valid, expected state (§3.6) |
 | An Output Structure checkbox is checked for a redundant section despite the UI normally disabling it (defensive) | Dedup logic (§6.1) re-checks server-side-computed `sections` before rendering, not just client-side, so a stale/tampered request still can't produce a duplicate section |
@@ -463,7 +463,7 @@ Depends on `docs/Enhancements2.md` §9 and `docs/Enhancements3.md` §11 being co
 3. **"Your generation history" panel**: new component reading `SessionMemoryStore` (§3.8), with
    the clear-preferences control (§3.7).
 4. **`/_api/context-extract` endpoint** (Phase 1 first: `.txt`/`.md` only) + `.docx` parsing via
-   `mammoth` (Phase 2) + Calypso OCR/multimodal routing (Phase 3, can ship later independently).
+   `mammoth` (Phase 2) + Cluster OCR/multimodal routing (Phase 3, can ship later independently).
 5. **Context Sources panel** on the Generation Profile screen, gating reference-document upload,
    prior-preferences toggle, style-example picker, and the web-search checkbox + warning.
 6. **Output Structure checkboxes**: `OUTPUT_STRUCTURE_EQUIVALENTS` dedup logic, `sectionNamesFor`

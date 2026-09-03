@@ -23,19 +23,19 @@ prompt):
   project space"* — this describes what section 3 below calls the **Local App** path: a
   developer/PM runs a script once, it downloads open-weight model files to disk, and all
   inference thereafter happens on that machine with zero network calls.
-- **Calypso** — an internal, VPC-only LLM gateway already documented for XYZ apps (`docs/XYZCalypso.md`).
+- **Cluster** — an internal, VPC-only LLM gateway already documented for XYZ apps (`docs/XYZCluster.md`).
 
 **Direct answer to "does downloading offline mean downloading the weights?"** — yes. "Download
 offline" = fetch the model's weight files (typically a multi-GB `.gguf` file) once, store them on
 disk, and run inference locally from then on with an inference engine like `llama.cpp`/Ollama.
 After that initial download, no further network access is required to generate a document.
 
-## 2. Is Calypso confirmed safe for confidential PRD content? — Short answer: not fully confirmed by the docs alone
+## 2. Is Cluster confirmed safe for confidential PRD content? — Short answer: not fully confirmed by the docs alone
 
-I reviewed both documents you attached (`docs/XYZCalypso.md` and the Nexa chat transcript about
-integrating Calypso into a React+Node+Mantine+OAuth app). Here is what is and isn't confirmed:
+I reviewed both documents you attached (`docs/XYZCluster.md` and the Nexa chat transcript about
+integrating Cluster into a React+Node+Mantine+OAuth app). Here is what is and isn't confirmed:
 
-**CONFIRMED, from `docs/XYZCalypso.md` itself:**
+**CONFIRMED, from `docs/XYZCluster.md` itself:**
 
 - The connection goes through a **private VPC endpoint** — *"no public internet traffic is
   involved."* This is a real, meaningful security property: the request never leaves Org's
@@ -43,7 +43,7 @@ integrating Calypso into a React+Node+Mantine+OAuth app). Here is what is and is
   external model providers like DeepSeek/Alibaba/Meta's hosting infra).
 - **No API key required — access is controlled at the network level**, i.e. by virtue of your app
   running inside the XYZ/VPC boundary, not by a secret that could leak.
-- It uses an internal self-signed certificate (`apps.services.calypso.intra.chrysler.com` is an
+- It uses an internal self-signed certificate (`apps.services.Cluster.intra.chrysler.com` is an
   internal-only DNS name, not publicly resolvable) — consistent with "internal-only service."
 - The example model shown is `mistral:7b` — if this reflects what's actually hosted, Mistral 7B is
   Apache-2.0 licensed (genuinely open-source), which would satisfy your "open source only"
@@ -55,25 +55,25 @@ integrating Calypso into a React+Node+Mantine+OAuth app). Here is what is and is
 
 **NOT stated anywhere in the docs you gave me (this is the gap):**
 
-- Whether Calypso **logs or retains** prompts/completions on the server side, and for how long.
-- Whether anything sent to Calypso is ever used to **fine-tune, evaluate, or improve** any model
+- Whether Cluster **logs or retains** prompts/completions on the server side, and for how long.
+- Whether anything sent to Cluster is ever used to **fine-tune, evaluate, or improve** any model
   (internal or otherwise).
-- Whether Calypso is **officially approved/certified for confidential business data** specifically
+- Whether Cluster is **officially approved/certified for confidential business data** specifically
   (e.g., PRDs containing competitive product plans), versus being an internal experimentation
   sandbox that happens to be network-isolated.
-- Who (which internal teams) has access to Calypso's own logs/observability, if any exist.
+- Who (which internal teams) has access to Cluster's own logs/observability, if any exist.
 
-None of this is a criticism of Calypso — it's simply that the documentation you were given is an
+None of this is a criticism of Cluster — it's simply that the documentation you were given is an
 **integration guide** (how to call it), not a **data-handling/compliance statement**. Network
 isolation (VPC-only, no public internet) is a strong signal, but it answers "can outsiders see my
 data in transit," not "does anything internal retain/use my data afterward."
 
 **My answer to your direct question: yes, confirm with a XYZ platform developer or your
-info-sec contact before sending PRD-confidential content to Calypso.** Specifically ask:
-(1) does Calypso log/retain prompts or completions, and for how long; (2) is any logged data used
-for any training/fine-tuning, internal or external; (3) is Calypso approved for
+info-sec contact before sending PRD-confidential content to Cluster.** Specifically ask:
+(1) does Cluster log/retain prompts or completions, and for how long; (2) is any logged data used
+for any training/fine-tuning, internal or external; (3) is Cluster approved for
 "confidential"-classified internal documents by your data-classification policy, not just general
-internal tooling. If the answers are "no retention, no training, yes approved," Calypso becomes
+internal tooling. If the answers are "no retention, no training, yes approved," Cluster becomes
 the **strongest option available** (see the recommendation in section 6) — it would be network-
 isolated *and* require none of the RAM/storage/Dockerfile changes that self-hosting a model
 yourself would need.
@@ -166,7 +166,7 @@ primary model — it's the same license family your OpenRouter plan already pref
 
 | | |
 |---|---|
-| **Pros** | Zero data leaves the machine, ever, for any reason — the strongest possible confidentiality posture. No OpenRouter account, no Calypso approval needed, no cloud dependency at all once weights are downloaded. |
+| **Pros** | Zero data leaves the machine, ever, for any reason — the strongest possible confidentiality posture. No OpenRouter account, no Cluster approval needed, no cloud dependency at all once weights are downloaded. |
 | **Cons** | **This is the wrong distribution model for your actual end users.** You told me this app is for **product managers**, not developers. A PM would need to run a shell script, install a multi-GB model, and keep a local server process running just to use a web form — that's a significant support/onboarding burden for a non-technical audience, and it means every PM's laptop needs enough free RAM (4-8GB) and disk space, with no central place to fix issues once. It also means the app can no longer be "just visit the XYZ URL" — it becomes "also install this other thing locally," which undermines the reason you migrated to XYZ in the first place. |
 
 ## 4. Option group B — XYZ-deployed app, but self-hosting the model on the pod itself
@@ -214,7 +214,7 @@ avoiding any third-party API.
    weights onto the pod would be baking them directly into the Docker image at build time (adding
    several GB to the image, and requiring a rebuild any time you change models).
 5. **CPU-only inference performance**: with no GPU, expect noticeably slower generation than
-   OpenRouter/Calypso (which run on real inference infrastructure), and — per
+   OpenRouter/Cluster (which run on real inference infrastructure), and — per
    `docs/XYZRAMOptions.md`'s own prior analysis — noticeably lower output quality than a
    frontier hosted model for the kind of large-context, multi-section reasoning a PRD/TRS/UX
    generation task requires.
@@ -224,24 +224,24 @@ avoiding any third-party API.
 | | |
 |---|---|
 | **Pros** | Single URL for PMs (no local install) *and* no data ever leaves Org-controlled infrastructure (once egress for the one-time download is resolved). Reuses the persistence pattern this platform already documents. |
-| **Cons** | The most implementation-heavy option of everything discussed (Dockerfile, resource limits, persistence, and a real open question about registry network egress, all needing changes/confirmation). Meaningfully slower and lower-quality output than either Calypso or OpenRouter, being CPU-only. Increases the container's resource footprint/cost continuously (8GB reserved RAM around the clock), vs. Calypso/OpenRouter which cost nothing when idle. |
+| **Cons** | The most implementation-heavy option of everything discussed (Dockerfile, resource limits, persistence, and a real open question about registry network egress, all needing changes/confirmation). Meaningfully slower and lower-quality output than either Cluster or OpenRouter, being CPU-only. Increases the container's resource footprint/cost continuously (8GB reserved RAM around the clock), vs. Cluster/OpenRouter which cost nothing when idle. |
 
 ## 5. Comparison across every option (including what's already built)
 
 | Option | Data leaves company network? | Setup effort from here | Ongoing cost when idle | Output quality (for PRD-length reasoning) | Fits "genuinely open-source only" rule |
 |---|---|---|---|---|---|
 | **OpenRouter (already built this session)** | Yes — to a third-party provider, even with privacy toggles set | None (already done) | $0 (free models) | Good, varies by model | Yes, by design (`:free` + Qwen/DeepSeek preference) |
-| **Calypso** | No — internal VPC only | Low, *if* approved (mostly wiring, similar shape to the OpenRouter client already built) | Unknown (ask platform team) | Unknown — depends which model(s) are actually hosted; ask | Unconfirmed — check the ATLAS model list |
+| **Cluster** | No — internal VPC only | Low, *if* approved (mostly wiring, similar shape to the OpenRouter client already built) | Unknown (ask platform team) | Unknown — depends which model(s) are actually hosted; ask | Unconfirmed — check the ATLAS model list |
 | **Local App** (Ollama / node-llama-cpp / llama-server) | No — never leaves the user's machine | Medium (per-user install), but **poor fit for a PM audience** | $0, but shifts RAM/CPU burden onto each user's laptop | Lower than cloud/frontier models (7-8B class) | Yes, if you pick Qwen/Phi-4/DeepSeek-distill |
 | **XYZ-deployed self-hosted model** | No — internal infra only, after one-time download | High (Dockerfile, resources, persistence, egress question) | High — 8GB reserved continuously | Lower than cloud/frontier models, and slower (CPU-only) | Yes, if you pick Qwen/Phi-4/DeepSeek-distill |
 | **Deterministic fallback generator (already built, always present)** | Never leaves the browser/server at all — no LLM involved | None (already exists, this is the safety net for every option above) | $0 | Template-based, not LLM-quality, but 100% predictable/safe | N/A — no model involved |
 
 ## 6. Recommendation
 
-1. **First, get the Calypso questions in section 2 answered by a XYZ platform developer /
-   info-sec contact.** If Calypso turns out to log/train on data, or isn't approved for
+1. **First, get the Cluster questions in section 2 answered by a XYZ platform developer /
+   info-sec contact.** If Cluster turns out to log/train on data, or isn't approved for
    confidential documents, it's disqualified regardless of how convenient it is. If it's cleared,
-   **Calypso is very likely your best option**: it needs no new Dockerfile changes, no persistent
+   **Cluster is very likely your best option**: it needs no new Dockerfile changes, no persistent
    storage, no extra RAM reservation, keeps the single-URL PM experience, and — being purpose-built
    internal infrastructure — is likely to be maintained/updated by people whose job is exactly
    this, unlike a model you self-host and babysit.
@@ -249,7 +249,7 @@ avoiding any third-party API.
    the above is resolved — keep the already-built integration in place (it's a good demonstration
    of the pattern and a fine fallback for non-sensitive test runs), but treat it as "not yet
    cleared for real confidential input" given the training concern raised.
-3. **If Calypso is ruled out**, the **XYZ-deployed self-hosted model** (section 4) is the more
+3. **If Cluster is ruled out**, the **XYZ-deployed self-hosted model** (section 4) is the more
    appropriate next choice over the **Local App** path (section 3) specifically *because your
    users are product managers, not developers* — a shell-script/CLI install is a real adoption
    barrier for that audience. Budget for the Dockerfile/persistence/RAM work described in section
@@ -266,12 +266,12 @@ avoiding any third-party API.
 
 ## 7. Open questions to resolve before writing any more code
 
-- [ ] Does Calypso log or retain prompts/completions, and for how long? (ask XYZ platform team)
-- [ ] Is anything sent to Calypso ever used for training/fine-tuning, internal or external?
-- [ ] Is Calypso formally approved for confidential/internal-restricted business documents, per
+- [ ] Does Cluster log or retain prompts/completions, and for how long? (ask XYZ platform team)
+- [ ] Is anything sent to Cluster ever used for training/fine-tuning, internal or external?
+- [ ] Is Cluster formally approved for confidential/internal-restricted business documents, per
       Org's own data classification policy — not just general internal tooling use?
-- [ ] What models are actually listed on the Calypso ATLAS dashboard today, and are they all
-      genuinely open-source (or does that even matter if Calypso itself is the trust boundary,
+- [ ] What models are actually listed on the Cluster ATLAS dashboard today, and are they all
+      genuinely open-source (or does that even matter if Cluster itself is the trust boundary,
       not the model license)?
 - [ ] If self-hosting on XYZ: does the XYZ cluster's network policy allow outbound egress to
       Hugging Face / Ollama's model registry, even just for a one-time download?

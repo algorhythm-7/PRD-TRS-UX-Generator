@@ -49,12 +49,12 @@ that never touches this screen produces byte-identical output to today.
 - `App.tsx` renders `InputForm` → on `onGenerate(request)` → calls generation directly (see
   `docs/Enhancements2.md` §2.1 for the full current pipeline trace). There is currently no
   intermediate screen between "fill out the form" and "see generated output."
-- `callCalypsoChat` (`app/server.mjs`, mirrored in `app/vite.config.ts`) builds a plain request
+- `callClusterChat` (`app/server.mjs`, mirrored in `app/vite.config.ts`) builds a plain request
   body: `{ model, messages, max_tokens }`, optionally adding `response_format`. Confirmed via
   reading the function directly: adding a `temperature` field is a one-line change (`if
-  (temperature !== undefined) body.temperature = temperature;`), since Calypso's endpoint is
+  (temperature !== undefined) body.temperature = temperature;`), since Cluster's endpoint is
   OpenAI-chat-completions-compatible and `temperature` is a standard field in that contract — no
-  new Calypso capability is being assumed, only a standard parameter this app hasn't sent yet.
+  new Cluster capability is being assumed, only a standard parameter this app hasn't sent yet.
 - `docs/Enhancements2.md` §3 already defines `FORMAT_APPLICABILITY`, `sectionNamesFor`, and
   `FORMAT_GUIDANCE` — this document's "Template" control (§2.2) is not a new mechanism, it's the
   same one, just relocated onto this new screen instead of living inline in `InputForm.tsx`.
@@ -200,7 +200,7 @@ export type InnovationAssistance = (typeof INNOVATION_ASSISTANCE_LEVELS)[number]
 
 Chosen **per `DocType`** (confirmed in the clarifying round: "separate preset per document type"),
 shown as a radio group in each `DocType`'s Generation Profile sub-panel (§2.2). Each level maps to
-**both** a `temperature` value sent to Calypso **and** a distinct prompt instruction — the
+**both** a `temperature` value sent to Cluster **and** a distinct prompt instruction — the
 qualitative instruction is what makes each level meaningfully different from a plain intensity
 dial, per the user's own framing ("this is one of your differentiators"):
 
@@ -212,17 +212,17 @@ dial, per the user's own framing ("this is one of your differentiators"):
 | Explore Alternative Designs | 0.8 | "Propose at least one clearly-labeled alternative approach in addition to the primary one described." |
 | Maximum Ideation | 1.0 | "Be maximally exploratory: propose novel ideas, alternative designs, and additional requirements liberally, all clearly and consistently labeled as ideation rather than confirmed requirements or the primary recommendation." |
 
-**No "reasoning effort" parameter is introduced** — this session found no evidence Calypso's
+**No "reasoning effort" parameter is introduced** — this session found no evidence Cluster's
 OpenAI-compatible endpoint supports a reasoning-effort/thinking-budget field beyond `temperature`
-and `max_tokens` (per `app/server.mjs`'s `callCalypsoChat`); inventing one would be adding an
-unverified API surface. If Calypso later adds support for such a parameter, `INNOVATION_ASSISTANCE`
+and `max_tokens` (per `app/server.mjs`'s `callClusterChat`); inventing one would be adding an
+unverified API surface. If Cluster later adds support for such a parameter, `INNOVATION_ASSISTANCE`
 levels could additionally set it, but this document does not claim that capability exists today.
 
 `temperature` is threaded through the existing per-request pipeline (no restructuring):
 `handleGenerate` reads `innovationAssistance` from the request body → looks up its `temperature` →
-passes to `callCalypso(messages, responseFormat, maxTokens, temperature)` → `callCalypsoChat`
+passes to `callCluster(messages, responseFormat, maxTokens, temperature)` → `callClusterChat`
 includes it in `body` only `if (temperature !== undefined)`, so omitting it (today's callers, and
-any future caller that doesn't set it) reproduces exactly today's Calypso request.
+any future caller that doesn't set it) reproduces exactly today's Cluster request.
 
 ---
 
@@ -351,7 +351,7 @@ base instruction → `DOC_TYPE_GUIDANCE` → `FORMAT_GUIDANCE` → EARS (if appl
 `GENERATION_MODE_GUIDANCE` → Requirement Depth/Decomposition guidance → Traceability guidance (if
 enabled) → Assumption Strategy guidance → Compliance Framing guidance (if enabled) → Innovation
 Assistance guidance → existing closing Markdown instruction. `handleGenerate` also extracts
-`innovationAssistance`'s mapped `temperature` value and passes it to `callCalypso(...,
+`innovationAssistance`'s mapped `temperature` value and passes it to `callCluster(...,
 temperature)` (§3, continued). All fields default exactly as specified per-control above when
 omitted, reproducing today's prompt and request body byte-for-byte.
 
@@ -364,7 +364,7 @@ omitted, reproducing today's prompt and request body byte-for-byte.
 | `requirementMapping` enabled but only TRS (no PRD) is being generated in the batch | Instruction is omitted server-side (nothing to map to) rather than instructing the model to reference a non-existent document — same "degrade to safe default, don't crash or hallucinate" principle as `docs/Enhancements2.md` §7 |
 | `verificationReferences` enabled without `generateIds` | Treated as a no-op for that instruction (no IDs exist to reference) rather than an error — client-side UI should visually gray out `verificationReferences` when `generateIds` is unchecked, but the backend does not depend on the client enforcing this |
 | Unknown/invalid `generationMode`/`targetAudience` value sent | Falls back to that `DocType`'s default (same "invalid combination degrades to safe default" principle as `docs/Enhancements2.md` §7's `sectionNamesFor` fallback) |
-| Calypso unavailable | Unchanged from `docs/Enhancements2.md` — `503 LLM_UNAVAILABLE`, deterministic fallback (which cannot honor any Generation Profile field, same limitation already documented for `priorAttempt` in `docs/Enhancements2.md` §4.6) |
+| Cluster unavailable | Unchanged from `docs/Enhancements2.md` — `503 LLM_UNAVAILABLE`, deterministic fallback (which cannot honor any Generation Profile field, same limitation already documented for `priorAttempt` in `docs/Enhancements2.md` §4.6) |
 
 ---
 
@@ -374,9 +374,9 @@ omitted, reproducing today's prompt and request body byte-for-byte.
   client-side-only decision already recorded in `docs/Enhancements2.md` §10.3.
 - No new sensitive-data category — all new fields are UI configuration choices (enum selections,
   booleans), not user content; none require different handling than the existing
-  `productTitle`/`productDetails` fields already sent to Calypso.
+  `productTitle`/`productDetails` fields already sent to Cluster.
 - `temperature` is a standard, publicly-documented OpenAI-chat-completions field — sending it
-  introduces no new trust boundary beyond the existing Calypso request path.
+  introduces no new trust boundary beyond the existing Cluster request path.
 
 ---
 
@@ -394,7 +394,7 @@ Ordered by dependency; depends on `docs/Enhancements2.md` §9's tasks 1–4 bein
    guidance maps, Traceability/Assumption Strategy/Compliance Framing guidance, and the
    `INNOVATION_ASSISTANCE` → `temperature` map, to `server.mjs`, mirrored into `vite.config.ts`.
    Extend `buildGenerateSystemPrompt` and `handleGenerate`'s `temperature` threading through
-   `callCalypso`/`callCalypsoChat`. *Validates*: existing `tests/http/generate.test.ts` continue to
+   `callCluster`/`callClusterChat`. *Validates*: existing `tests/http/generate.test.ts` continue to
    pass with no new fields supplied (byte-identical request/prompt); new tests per guidance block.
 3. **New `GenerationProfileScreen` component** (frontend): renders the per-`DocType` sub-panels
    (embedding `docs/Enhancements2.md` §3.6's Template radio group) plus the shared panel

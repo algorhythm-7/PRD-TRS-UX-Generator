@@ -3,7 +3,7 @@
 **Audit date:** 2026-08-28
 **Auditor:** Automated agent (builder mode), independent post-implementation verification
 **Scope:** `docs/EnhancementToDo3.md` §1–§12 (all marked complete), verified against the running
-application (dev server, real Calypso backend) rather than re-reading implementation notes only.
+application (dev server, real Cluster backend) rather than re-reading implementation notes only.
 **Constraint honored:** no source files were modified during this audit; findings below are
 report-only, per the audit instruction.
 
@@ -11,14 +11,14 @@ report-only, per the audit instruction.
 
 - Automated test suite baseline: 110/110 passing across 25 files as of commit `6c60c63` (not
   re-run in this audit; see §7 "Missing test coverage" for gaps the suite doesn't close).
-- Live verification: dev server (`npm run dev`, Vite on port 3001) against the real Calypso
+- Live verification: dev server (`npm run dev`, Vite on port 3001) against the real Cluster
   cluster (`vllm-glm-52` primary, confirmed `ready:true` via `/_api/llm-status`), driven through
   the actual browser UI (no mocking) for one full user journey:
   - InputForm → PRD+TRS selected → Continue
   - Generation Profile screen: PRD set to Custom Template (uploaded a 3-section `.txt`), Volere
     vs Standard vs Custom dedup logic exercised, reference document uploaded, TRS left at
     Standard defaults
-  - Generate → real clarifying questions returned by Calypso → Skip
+  - Generate → real clarifying questions returned by Cluster → Skip
   - Full PRD + TRS generation completed successfully
   - Edited PRD content directly in the textarea → "Regenerate with my edits" → comment + one
     section marked "rewrite" → Confirm → regeneration completed and correctly incorporated both
@@ -41,7 +41,7 @@ report-only, per the audit instruction.
 | §2 Section-skeleton dedup (`sectionNamesFor`) | `app/src/generation/sectionSchema.ts` | Output Structure checkboxes disable+tooltip items already covered by the chosen template/format, re-evaluate on template change | Live UI: cycled Standard→Volere→Custom(with upload) for PRD, observed correct disable/enable/tooltip changes at each step | CONFIRMED PASS |
 | §3 Prompt guidance blocks (format/EARS/mode/depth/decomposition/traceability/assumption/compliance/output-structure/audience/reference-content/innovation) | `app/server.mjs` + `app/vite.config.ts` | Generated content reflects the selected profile and any reference material | Live generation: PRD output used the **custom template's exact 3 sections** ("1. Executive Summary", "2. Key Features", "3. Rollout Plan") and **wove in the uploaded reference document's content** (per-seat pricing, offline mode, CSV export, Slack) verbatim into both PRD and TRS | CONFIRMED PASS |
 | §4 New endpoints (`template-extract`, `context-extract` incl. `.docx`/`.pdf`) | `app/server.mjs` + `app/vite.config.ts` | Uploading a template file extracts section names; uploading a reference doc makes its content available to generation | Live UI: template upload showed "Extracted sections: Executive Summary, Key Features, Rollout Plan"; reference-doc upload showed no confirmation UI, but its content **did** appear in the final generated PRD/TRS, proving the pipeline works | PASS (functionally) / UX gap (see §6) |
-| §4 Phase 3 `.pdf` via multimodal | `app/server.mjs` | PDF context extraction works via Calypso multimodal endpoint | Not re-tested live this round (previously flagged UNVERIFIED with a minimal hand-crafted PDF returning empty text) | **UNKNOWN** — carry-over risk, see §3 Failed/Unverified |
+| §4 Phase 3 `.pdf` via multimodal | `app/server.mjs` | PDF context extraction works via Cluster multimodal endpoint | Not re-tested live this round (previously flagged UNVERIFIED with a minimal hand-crafted PDF returning empty text) | **UNKNOWN** — carry-over risk, see §3 Failed/Unverified |
 | §5 Client API layer | `app/src/api/llmClient.ts` | All new fields serialize correctly into `/_api/generate` requests | Live generation reflected all profile fields correctly (see §3 result) | CONFIRMED PASS |
 | §6 Generation-service wiring, `regenerateWithFeedback` | `app/src/generation/llmGenService.ts` | Regenerate call carries prior content + comment + section signals | Live: regenerated PRD content changed in exactly the way implied by the edit + comment + thumbs-down signal | CONFIRMED PASS |
 | §7 Session memory module | `app/src/generation/sessionMemory.ts` | Learned preferences persist across sessions in `localStorage`; last-session per-DocType fields update live | Live: history entry appeared immediately after generation with correct per-DocType template/mode/audience; edited-section and thumbs-down counts updated after edit+regenerate flow | CONFIRMED PASS, with one numeric anomaly (see §4 Bugs) |
@@ -59,14 +59,14 @@ report-only, per the audit instruction.
   decomposition, innovation, target audience) for PRD and TRS.
 - Output Structure dedup logic is fully reactive and correct across Standard, Volere, and
   Custom-with-uploaded-template states.
-- Custom Template upload + section extraction works end-to-end against real Calypso, with
+- Custom Template upload + section extraction works end-to-end against real Cluster, with
   visible confirmation text.
 - Reference-document content is genuinely incorporated into generated output (verified by
   content matching, not just a 200 response).
 - Full two-step flow (InputForm → Profile → Generate) works, including a real clarifying-questions
   round-trip with Skip.
 - Full document generation succeeded for both PRD (custom template) and TRS (standard template)
-  against the real Calypso backend.
+  against the real Cluster backend.
 - Edit-then-regenerate flow works correctly: edit detection, two-step confirm UI (comment +
   per-section thumbs), and the regenerated content demonstrably reflects both the direct edits
   and the free-text comment.
@@ -145,7 +145,7 @@ report-only, per the audit instruction.
 ## 8. F. Regression risks
 
 - The Phase 3 PDF-extraction path was substituted (MinerU's real API contract is undocumented;
-  Calypso's multimodal `vllm-qwen36-35b-a3b` chat-completions path is used instead). If a real
+  Cluster's multimodal `vllm-qwen36-35b-a3b` chat-completions path is used instead). If a real
   end-user PDF is ever uploaded before this is properly verified with a real (non-synthetic) PDF,
   there's a risk of silent empty-text extraction going unnoticed, since — per the UX issue above
   — there is no visible confirmation for context-extract uploads at all.
@@ -172,13 +172,13 @@ report-only, per the audit instruction.
 - No automated test covers the **no-visible-feedback** UX gap for context-extract uploads (not
   a candidate for an automated test per se, but worth a product/UX decision either way).
 - `RegenerateFallbackFor`'s UI message path (`OutputView.tsx`) has test coverage per the
-  implementation notes, but was not exercised against a *real* Calypso fallback trigger in this
+  implementation notes, but was not exercised against a *real* Cluster fallback trigger in this
   live audit (only against the automated test's simulated fallback).
 
 ## 10. Summary
 
 All ToDo3 §1–§12 functionality exercised live in this audit behaved correctly against the real
-application and real Calypso backend, including the full generate → edit → regenerate → history
+application and real Cluster backend, including the full generate → edit → regenerate → history
 loop. One unresolved numeric anomaly (thumbs-down count) and one UX gap (no upload confirmation
 for reference documents) are the most actionable findings. The Phase 3 PDF extraction path
 remains the single carried-over unverified item and should be prioritized for a real-PDF retest

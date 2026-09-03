@@ -83,7 +83,7 @@ balances quality against user friction.
 configuration (not just a vague "recent projects" list) — genuinely useful for a returning user
 trying to remember "what did I pick last time."
 
-**Calypso (internal LLM cluster) integration resilience.** Racing multiple candidate models in
+**Cluster (internal LLM cluster) integration resilience.** Racing multiple candidate models in
 parallel, a two-attempt structured-then-plain-JSON retry strategy per candidate, explicit
 context-limit detection in error messages, and a deterministic offline fallback so the product
 *never* produces literally nothing — this is a notably more resilient integration pattern than a
@@ -557,7 +557,7 @@ either the client-facing endpoints or the outbound calls to the model cluster.
   eliminate redundant model calls for identical repeated requests (common during iterative manual
   testing/demoing).
 - **Observability:** today's only visibility is unstructured console log lines tagged by category
-  (`[calypso]`, `[llm]`, `[oauth]`, `[proxy]`). A mature system needs structured, queryable logs at
+  (`[Cluster]`, `[llm]`, `[oauth]`, `[proxy]`). A mature system needs structured, queryable logs at
   minimum, and ideally distributed tracing across the gap-analysis → generate → regenerate chain.
 - **Monitoring/metrics:** per-candidate success rate, latency percentiles, and fallback-trigger
   rate are currently invisible — these should become first-class metrics, not something inferred
@@ -590,7 +590,7 @@ document content genuinely influences generated output comes from manual, one-of
 against the real cluster, not from anything in the automated suite.
 
 **Recommendations, in order of maturity:**
-- **Integration tests** that exercise the full client → server → (mocked) Calypso round-trip,
+- **Integration tests** that exercise the full client → server → (mocked) Cluster round-trip,
   catching wiring bugs that unit tests of isolated functions can't (e.g. a field silently dropped
   between the client request and the server's prompt assembly).
 - **E2E tests** against a real or realistically-mocked model, covering the full user journey
@@ -603,7 +603,7 @@ against the real cluster, not from anything in the automated suite.
 - **Prompt regression tests** — snapshot or rubric-based tests that fail loudly when a prompt-
   guidance change unexpectedly alters output for the fixed evaluation set, giving prompt authors
   the same regression safety net code changes already have.
-- **Performance tests** — basic latency/success-rate benchmarks against the real Calypso cluster,
+- **Performance tests** — basic latency/success-rate benchmarks against the real Cluster cluster,
   run periodically (not on every commit, given cost/latency) to catch silent degradation in model
   candidate reliability over time.
 - **Security tests** — currently no explicit security test coverage exists; once any
@@ -621,7 +621,7 @@ regression protection code quality already enjoys.
 ## Section 13: Known Technical Debt
 
 **Server/dev-mode logic duplication** (`app/server.mjs` and `app/vite.config.ts`). The single
-largest structural debt item: every prompt-guidance table, JSON schema, and the entire Calypso
+largest structural debt item: every prompt-guidance table, JSON schema, and the entire Cluster
 HTTP client are hand-duplicated between these two files, by necessity of the production Docker
 build copying only `server.mjs` into the runtime image. Every future change to generation logic
 must be manually mirrored in both places or dev/prod behavior will silently diverge — this is a

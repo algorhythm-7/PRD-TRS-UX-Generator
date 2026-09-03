@@ -1,7 +1,7 @@
 # Enhancement To-Do - Builder Tracking
 
 > **⚠️ SUPERSEDED by `docs/EnhancementToDo2.md`.** This tracked the OpenRouter-backed design,
-> which was scrapped in favor of an internal Calypso-backed design. Kept only as historical
+> which was scrapped in favor of an internal Cluster-backed design. Kept only as historical
 > record - do not resume work from this file.
 
 Tracks execution of `docs/EnhancementBuildPlan.md`. Updated as work progresses. "Done" means

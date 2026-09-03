@@ -32,7 +32,7 @@ against the plans. A few things needed reconciling before turning the plans into
   4th `additionalSections` param. Building the final 4-parameter signature in one pass (§2 below)
   avoids a needless second migration/signature churn — exactly the kind of avoidable conflict this
   to-do was asked to prevent.
-- **Current `callCalypso` already races candidates in parallel**, with per-attempt/overall
+- **Current `callCluster` already races candidates in parallel**, with per-attempt/overall
   timeouts, a gap-analysis token-budget fix, and diagnostic logging — all added in a live-debugging
   session *after* these planning docs were written. None of this contradicts the plans; threading
   `temperature` and the new prompt-guidance parameters into it (§3 below) is a straightforward
@@ -118,7 +118,7 @@ All new shared types added in one pass, since nearly everything downstream depen
 
 ---
 
-## 3. Backend prompt guidance & Calypso plumbing (`app/server.mjs` + `app/vite.config.ts`, kept in sync)
+## 3. Backend prompt guidance & Cluster plumbing (`app/server.mjs` + `app/vite.config.ts`, kept in sync)
 
 - [x] 1. `FORMAT_GUIDANCE` object, 9 entries, one per named format — condensed guidance per
       `docs/Enhancements2.md` §3.4's bullet list, full wording authored from
@@ -170,7 +170,7 @@ All new shared types added in one pass, since nearly everything downstream depen
       into `buildGenerateSystemPrompt` (new optional `innovationAssistance` param) in this batch;
       `.temperature` is stored alongside it in the same map (so it's a used object property, not
       an unused top-level binding — keeps `tsc -b` green without pulling in task 11 early) and
-      will be threaded into `callCalypso`/`callCalypsoChat` when task 11 is done.
+      will be threaded into `callCluster`/`callClusterChat` when task 11 is done.
 - [x] 9. Output Structure guidance — 8 items, short descriptions given in `docs/Enhancements4.md`
       §6.2 table; applicability per `DocType` also from that table. Wired into
       `buildGenerateSystemPrompt` as a new optional `outputStructureItems` param (string array);
@@ -188,14 +188,14 @@ All new shared types added in one pass, since nearly everything downstream depen
       in this exact order (verified by re-reading the assembled `parts` array) — this task's only
       remaining work was the docstring/order confirmation, since the reference-content block does
       not exist yet and is correctly omitted for now.
-- [x] 11. Thread `temperature` through `callCalypsoChat`/`callCalypso`: add an optional `temperature`
+- [x] 11. Thread `temperature` through `callClusterChat`/`callCluster`: add an optional `temperature`
       param, include it in the request `body` only `if (temperature !== undefined)` — same pattern
       already used for `maxTokens`; no restructuring of the existing parallel-race implementation
       needed.
 - [x] 12. Extend `handleGenerate` to read all new optional fields from the request body (defaulting
       every one exactly as specified per-control in `docs/Enhancements3.md`/`docs/Enhancements4.md`)
       and pass them through. `innovationAssistance` additionally resolves a `temperature` via
-      `INNOVATION_ASSISTANCE[...]?.temperature`, passed to `callCalypso` (task 11). All fields are
+      `INNOVATION_ASSISTANCE[...]?.temperature`, passed to `callCluster` (task 11). All fields are
       optional/undefined-safe, so today's client (which sends none of them) is unaffected — client
       wiring to actually send these fields is a separate, later UI task.
 - [x] 13. Mirror all of the above into `app/vite.config.ts`'s dev implementation. Done concurrently
@@ -222,33 +222,33 @@ All new shared types added in one pass, since nearly everything downstream depen
 ## 4. New backend endpoints (`app/server.mjs` + `app/vite.config.ts`)
 
 - [x] 1. `POST /_api/template-extract` (`docs/Enhancements2.md` §3.5) — mirrors
-      `handleGapAnalysis`'s pattern exactly: one `callCalypso` call, small purpose-built system
+      `handleGapAnalysis`'s pattern exactly: one `callCluster` call, small purpose-built system
       prompt, `response_format` schema `{ sections: string[] }`. `503 LLM_UNAVAILABLE` on failure, no
       deterministic fallback (none is sensible here).
 - [x] 2. `POST /_api/context-extract`, **Phase 1 only** (`docs/Enhancements4.md` §4.2) —
       `.txt`/`.md`: request `{ filename, rawText }`, response `{ extractedText, truncated }`. Needs
-      **no Calypso call at all** for Phase 1 — just enforces the character budget (§4.3: 8,000 chars
+      **no Cluster call at all** for Phase 1 — just enforces the character budget (§4.3: 8,000 chars
       per document, 12,000 combined across up to 3 documents, proportional trim if needed). **Note**:
       only the per-document 8,000-char cap is enforced server-side, since this endpoint's request
       shape (`{ filename, rawText }`) is single-document — the 12,000-combined/proportional-trim
       rule spans multiple documents in one generation batch and is inherently a client-side
       concern (deciding how much of each of up to 3 uploads to send), not yet built (§4 task 4/§5).
 - [x] 3. *Validates*: contract tests for both endpoints' request/response shapes; manual
-      live-verification against real Calypso for `template-extract` (per this session's established
-      "live-test any new Calypso-backed endpoint" pattern) — `context-extract` Phase 1 needs no live
-      Calypso test since it never calls it. **Implementation note**: added
+      live-verification against real Cluster for `template-extract` (per this session's established
+      "live-test any new Cluster-backed endpoint" pattern) — `context-extract` Phase 1 needs no live
+      Cluster test since it never calls it. **Implementation note**: added
       `app/tests/server/newEndpoints.test.ts` (5 tests) against `vite.config.ts`'s exported
       `templateExtractSchema`/`applyContextExtractBudget` (the latter extracted from the dev
       middleware's inline logic into a pure, testable function — same rationale as task 14's
       `buildGenerateSystemPrompt` export). Live-verified `template-extract` against the running
-      dev server + real Calypso: `POST /_api/template-extract` with a 5-line numbered template
+      dev server + real Cluster: `POST /_api/template-extract` with a 5-line numbered template
       returned `{"sections":["Executive Summary","Goals and Non-Goals","User Stories","Success
       Metrics","Timeline"]}` (200 OK). Also smoke-tested `context-extract` live (200 OK,
       `truncated:false` for short input).
 - [x] 4. **Sequence last, after §8/§9 ship and are verified** (per `docs/Enhancements4.md` §4.1's own
       "can ship later independently" note, not a hard blocker): `context-extract` Phase 2 (`.docx`
       via a new `mammoth` client-side dependency) and Phase 3 (`.pdf`/scanned documents routed
-      server-side to Calypso's `middlewareai-mineru` OCR or `vllm-qwen36-35b-a3b` multimodal model).
+      server-side to Cluster's `middlewareai-mineru` OCR or `vllm-qwen36-35b-a3b` multimodal model).
       §8/§9 shipped and were verified before this was picked up.
       **Phase 2 (.docx)**: added `mammoth` as a real dependency (approved) + a local
       `app/src/mammoth.d.ts` ambient declaration (no `@types/mammoth` package exists on npm,
@@ -261,15 +261,15 @@ All new shared types added in one pass, since nearly everything downstream depen
       existing OpenAI-compatible chat endpoint (an `image_url` content block with a
       `data:application/pdf;base64,...` URI), **not** `middlewareai-mineru` — that OCR service's
       actual request/response contract is undocumented anywhere in this repo, direct network
-      probing from this environment failed (no route to the Calypso base URL outside the app's
+      probing from this environment failed (no route to the Cluster base URL outside the app's
       own proxy), and its real API is very likely a custom multipart upload the shared
-      `calypsoRequest` JSON-only helper doesn't support — implementing against a fully-guessed
+      `ClusterRequest` JSON-only helper doesn't support — implementing against a fully-guessed
       contract was judged too risky. The multimodal-chat approach reuses already-verified
-      infrastructure (`callCalypso`, its racing/timeout/retry logic) with only the message
-      `content` shape widened to allow content-block arrays (`CalypsoMessageContent` type, both
+      infrastructure (`callCluster`, its racing/timeout/retry logic) with only the message
+      `content` shape widened to allow content-block arrays (`ClusterMessageContent` type, both
       files). Server: `/_api/context-extract` now accepts an optional `base64Content` field
       (routes to `extractPdfViaMultimodal`, returns `503 LLM_UNAVAILABLE` on failure per §4.6's
-      own Phase-3-specific error row — Phase 1/2 remain error-free/no-Calypso as before); its
+      own Phase-3-specific error row — Phase 1/2 remain error-free/no-Cluster as before); its
       Express JSON body limit raised to `20mb` for base64-encoded PDFs. Client:
       `postContextExtractBinary` (new function in `llmClient.ts`) + a `fileToBase64` helper; `.pdf`
       routed through it in the reference-document and style-example upload handlers (not the
@@ -277,14 +277,14 @@ All new shared types added in one pass, since nearly everything downstream depen
       **Live-tested — inconclusive, flagged rather than papered over**: POSTed a hand-crafted
       minimal valid PDF containing visible text to `/_api/context-extract` with `base64Content`
       via the running dev server. Result: `200 OK`, `{"extractedText":"","truncated":false}` — the
-      full pipeline (routing, Calypso call, schema, budget) works end-to-end with **no errors**,
+      full pipeline (routing, Cluster call, schema, budget) works end-to-end with **no errors**,
       but the model returned **no extracted text** for this test PDF. This does not confirm the
       integration actually works for real-world PDFs: it may be that this deployment doesn't treat
       `image_url` + `application/pdf` as true multimodal input (silently answering the schema with
       empty content instead), or that the specific hand-crafted test file wasn't renderable by
       whatever it does. **Recommendation before relying on this in production**: test with a real,
       typical PDF (and/or a plain image) and inspect server logs for `finish_reason`/`usage`
-      diagnostics (already logged by `callCalypsoChat` on empty responses) to determine which case
+      diagnostics (already logged by `callClusterChat` on empty responses) to determine which case
       applies, per this repo's own "state uncertainty, don't guess" instruction.
 
 ---
@@ -344,7 +344,7 @@ All new shared types added in one pass, since nearly everything downstream depen
       `docs/Enhancements3.md` §8 nor `docs/Enhancements4.md` §7's own assembly-order lists ever
       mention Target Audience at all — placed it beside Generation Mode as an authored resolution
       (both are audience/lens controls), not a documented requirement. Live-verified against real
-      Calypso: a PRD request with `targetAudience:"customer"` + `priorAttempt` (comment "Make it
+      Cluster: a PRD request with `targetAudience:"customer"` + `priorAttempt` (comment "Make it
       punchier", one section marked `rewrite`) returned 200 with content reflecting the edit
       instruction.
 - [x] 3. *Validates*: extend `tests/generation/llmGenService.test.ts`; a test asserting an
@@ -519,7 +519,7 @@ second developer, but sequenced here since it depends on §6's `regenerateWithFe
       module. **Implementation note**: written with `editedSectionCount`/`thumbsDownSectionCount`
       at 0 (nothing could have been edited yet for content that was just generated); written
       regardless of LLM-vs-fallback source, since it logs the user's chosen configuration, not
-      Calypso's availability.
+      Cluster's availability.
 - [x] 2. Wire `editedSectionCount`/`thumbsDownSectionCount` from §10's edit/thumbs state into the
       `SessionRecord` at write time. **Design resolution**: since task 1's write happens
       immediately after generation (before any edits/thumbs exist), these counts are updated
@@ -552,7 +552,7 @@ second developer, but sequenced here since it depends on §6's `regenerateWithFe
 - [x] 2. Full `vitest run` — confirm the pre-existing 43 tests still pass unmodified, plus every new
       test added in §1–§11. **Result**: 110/110 tests passing across 25 test files (build also
       re-verified via `npm run build`, succeeded).
-- [x] 3. Manual live smoke test against real Calypso: default-only flow (no Profile changes) matches
+- [x] 3. Manual live smoke test against real Cluster: default-only flow (no Profile changes) matches
       today's behavior; a flow using at least one non-Standard Template, one Innovation Assistance
       level above default, and one Traceability checkbox, confirming the assembled prompt order from
       §3.10 and a real successful generation. **Result**: (1) default PRD request (no new fields) —
@@ -562,7 +562,7 @@ second developer, but sequenced here since it depends on §6's `regenerateWithFe
       IDs with a Volere-style *Fit Criterion* on every requirement, and clearly more proposed
       requirements (SSO, RBAC, audit logging, offline sync, retention) than the baseline request
       — confirming Template, Traceability, and Innovation Assistance guidance are all correctly
-      assembled and affect real Calypso output as designed.
+      assembled and affect real Cluster output as designed.
 
 ---
 

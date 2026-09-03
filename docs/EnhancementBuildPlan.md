@@ -1,7 +1,7 @@
 # Enhancement Build Plan - LLM-Assisted Generation (Steps 0-4)
 
 > **⚠️ SUPERSEDED by `docs/EnhancementBuildPlan2.md`.** This document describes the OpenRouter-
-> backed design, which was scrapped in favor of an internal Calypso-backed design. Kept only as
+> backed design, which was scrapped in favor of an internal Cluster-backed design. Kept only as
 > historical record - do not implement anything from this file. See `docs/EnhancementBuildPlan2.md`
 > and `docs/EnhancementToDo2.md` for the current design.
 

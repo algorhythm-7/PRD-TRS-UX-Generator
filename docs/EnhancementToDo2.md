@@ -1,4 +1,4 @@
-# Enhancement To-Do 2 — Builder Tracking (Calypso integration, replaces OpenRouter)
+# Enhancement To-Do 2 — Builder Tracking (Cluster integration, replaces OpenRouter)
 
 Tracks execution of `docs/EnhancementBuildPlan2.md`. **This supersedes `docs/EnhancementToDo.md`**
 (the OpenRouter task list) — do not resume work from that file. "Done" means implemented **and**
@@ -16,9 +16,9 @@ validated (lint/tsc/build/test as applicable), not just written.
 - [x] 2. Removed from `app/vite.config.ts`.
 - [x] 3. Validated clean.
 
-## 2. Implement the Calypso client helpers in `app/server.mjs`
+## 2. Implement the Cluster client helpers in `app/server.mjs`
 
-- [x] 4. Added, plus a split `CALYPSO_GAP_ANALYSIS_MAX_TOKENS` (1024) / `CALYPSO_GENERATE_MAX_TOKENS`
+- [x] 4. Added, plus a split `Cluster_GAP_ANALYSIS_MAX_TOKENS` (1024) / `Cluster_GENERATE_MAX_TOKENS`
       (8192) rather than one shared value - found via live testing that a single 4096 default was
       an unnecessary regression vs. OpenRouter's old "no explicit cap" behavior.
 - [x] 5. Implemented with `node:https` + scoped `Agent({ rejectUnauthorized: false })`. No new
@@ -30,7 +30,7 @@ validated (lint/tsc/build/test as applicable), not just written.
       puts section names at the top level, but the frontend's `GenerateResponse` type expects
       `{ sections: {...} }` - every real generate call was silently failing at
       `buildGeneratedDocument` (`Cannot read properties of undefined`) and falling back, even
-      though Calypso's response was perfectly valid. This bug pre-dates Calypso entirely (same
+      though Cluster's response was perfectly valid. This bug pre-dates Cluster entirely (same
       shape existed in the original OpenRouter code) and was never caught before because
       OpenRouter was never live-tested with a real key. Fixed by wrapping the response as
       `res.json({ sections: result })`.
@@ -42,9 +42,9 @@ validated (lint/tsc/build/test as applicable), not just written.
 ## 3. Frontend additions (small, additive — most existing frontend code is untouched)
 
 - [x] 14. Added. **Also bumped `DEFAULT_TIMEOUT_MS` from 20000 to 100000** in the same file -
-       found via live testing that Calypso's real response times (12-37s observed) could
+       found via live testing that Cluster's real response times (12-37s observed) could
        legitimately exceed the old 20s client-side abort, discarding perfectly good responses.
-       Must stay above `CALYPSO_CHAT_TIMEOUT_MS` (90000).
+       Must stay above `Cluster_CHAT_TIMEOUT_MS` (90000).
 - [x] 15. Implemented as designed.
 - [x] 16. Confirmed - no other frontend file needed changes.
 - [x] 17. Validated clean.
@@ -65,7 +65,7 @@ validated (lint/tsc/build/test as applicable), not just written.
 ## 5. Live manual verification (required — do not skip)
 
 - [x] 21. Confirmed - `GET /_api/llm-status` correctly reflected `vllm-glm-52`'s real live state
-       (`ONLINE`), cross-checked against direct `curl` calls to Calypso.
+       (`ONLINE`), cross-checked against direct `curl` calls to Cluster.
 - [x] 22. Confirmed - `POST /_api/llm-warmup` successfully triggers `/cmd/start`.
 - [x] 23. Confirmed via full browser UI walkthrough (Fleet Tracker / UX doc type): real,
        detailed, LLM-authored content rendered with no fallback notice, after fixing the
@@ -80,8 +80,8 @@ validated (lint/tsc/build/test as applicable), not just written.
        model to echo the schema back verbatim instead of producing matching data on that path.
        Fixed by extracting `responseFormat.json_schema.schema` and clarifying the instruction
        wording ("this is a schema, not the output - do not return the schema itself").
-- [x] 25. **Safely tested via `CALYPSO_MODEL_CANDIDATES` env-var override** (no code changes, no
-       real Calypso app touched/disabled - fake app names always return `state=UNKNOWN` and are
+- [x] 25. **Safely tested via `Cluster_MODEL_CANDIDATES` env-var override** (no code changes, no
+       real Cluster app touched/disabled - fake app names always return `state=UNKNOWN` and are
        skipped harmlessly): confirmed the full 3-level cascade works - (a) fake primary → skipped
        → real `vllm-qwen36-35b-a3b` → real `vllm-gpt-oss-120b` succeeds; (b) all three candidates
        fake → correct `503 { error: "LLM_UNAVAILABLE" }`. **Found and fixed one more real bug**:
