@@ -659,7 +659,6 @@ export function GenerationProfileScreen({
             </p>
             <ul>
               {referenceDocuments.map((doc, index) => (
-                // eslint-disable-next-line react/no-array-index-key -- documents aren't individually removable/reordered, only appended/capped
                 <li key={index}>{previewText(doc)}</li>
               ))}
             </ul>
