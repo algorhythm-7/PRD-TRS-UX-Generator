@@ -30,6 +30,9 @@ const oauthEnabled = Boolean(CLIENT_ID && CLIENT_SECRET);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 const GEMINI_PDF_MODEL = process.env.GEMINI_PDF_MODEL || GEMINI_MODEL;
+// With callGemini's 3-call retry budget, worst case per request is 1 structured attempt + 2 chat
+// attempts = GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS + 2 * GEMINI_CHAT_TIMEOUT_MS = 20000 + 2*90000
+// = 200000ms (~3.3 min) at these defaults - already a reasonable total, so left unchanged.
 const GEMINI_CHAT_TIMEOUT_MS = Number(process.env.GEMINI_CHAT_TIMEOUT_MS || 90000);
 const GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS = Number(
   process.env.GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS || 20000,
@@ -133,21 +136,36 @@ function withTimeout(promise, timeoutMs, label) {
 }
 
 /** Calls Gemini generateContent. Tries JSON-schema mode first; on failure, retries with the
- * schema embedded in the user message and defensive text parsing. */
+ * schema embedded in the user message and defensive text parsing.
+ *
+ * Retry budget: capped at MAX_GEMINI_CALLS (3) total upstream Gemini calls per invocation, so a
+ * single failing request can never fan out across every candidate model/attempt combination (up
+ * to 4 models * 2 attempts = 8 calls, pre-cap) and burn free-tier quota on a response the client
+ * has likely already given up on. Only the first candidate model gets the withSchema:true +
+ * withSchema:false pair; any subsequent fallback model gets a single withSchema:false attempt.
+ * Worst case is therefore 1 structured + 2 chat attempts = GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS +
+ * 2 * GEMINI_CHAT_TIMEOUT_MS (see DEFAULT_TIMEOUT_MS in src/api/llmClient.ts, which must exceed
+ * this). */
 async function callGemini(messages, responseFormat, maxTokens, temperature, modelId = GEMINI_MODEL) {
   const { systemInstruction, contents } = messagesToGemini(messages);
   const candidateModels = Array.from(
     new Set([modelId, "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"].filter(Boolean)),
   );
+  const MAX_GEMINI_CALLS = 3;
+  let callsMade = 0;
   let lastError;
   const genAI = getGeminiClient();
 
-  for (const currentModelId of candidateModels) {
-    const attempts = responseFormat
-      ? [{ withSchema: true }, { withSchema: false }]
-      : [{ withSchema: false }];
+  for (let modelIndex = 0; modelIndex < candidateModels.length && callsMade < MAX_GEMINI_CALLS; modelIndex++) {
+    const currentModelId = candidateModels[modelIndex];
+    const attempts =
+      responseFormat && modelIndex === 0
+        ? [{ withSchema: true }, { withSchema: false }]
+        : [{ withSchema: false }];
 
     for (const attempt of attempts) {
+      if (callsMade >= MAX_GEMINI_CALLS) break;
+      callsMade++;
       try {
         const generationConfig = { maxOutputTokens: maxTokens };
         if (temperature !== undefined) generationConfig.temperature = temperature;

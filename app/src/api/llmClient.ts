@@ -9,8 +9,10 @@ import type {
   TargetAudience,
 } from "../generation/contract";
 
-// Must exceed the backend's own worst-case Gemini wait (default 90s structured + retry).
-const DEFAULT_TIMEOUT_MS = 100000;
+// Must exceed 3 calls (callGemini's retry budget) * worst-case per-call timeout from
+// @server.mjs/vite.config.ts callGemini: 1 structured attempt + 2 chat attempts =
+// GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS (20000) + 2 * GEMINI_CHAT_TIMEOUT_MS (90000) = 200000ms.
+const DEFAULT_TIMEOUT_MS = 220000;
 
 /** Thrown for any non-2xx or timed-out /_api/llm/* call (IFACE-LLMCLIENT). */
 export class LlmClientError extends Error {

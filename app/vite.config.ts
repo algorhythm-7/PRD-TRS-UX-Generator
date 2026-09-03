@@ -869,10 +869,134 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
   ]);
 }
 
+/** Config bundle for `callGemini`, extracted out of `createLlmDevPlugin`'s closure so the
+ * function can be a standalone, importable, unit-testable export (see tests/server/callGemini
+ * retry-budget test). */
+export interface GeminiCallConfig {
+  apiKey: string;
+  defaultModel: string;
+  chatTimeoutMs: number;
+  structuredAttemptTimeoutMs: number;
+}
+
+function getGeminiClient(apiKey: string): GoogleGenerativeAI {
+  if (!apiKey) throw new Error("LLM_UNAVAILABLE");
+  return new GoogleGenerativeAI(apiKey);
+}
+
+function extractJsonBlock(text: string): unknown {
+  const stripped = text.replace(/```json/gi, "```").replace(/```/g, "");
+  const start = stripped.indexOf("{");
+  const end = stripped.lastIndexOf("}");
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error("No JSON object found in response");
+  }
+  return JSON.parse(stripped.slice(start, end + 1));
+}
+
+/** Calls Gemini generateContent. Tries JSON-schema mode first; on failure, retries with the
+ * schema embedded in the user message and defensive text parsing.
+ *
+ * Retry budget: capped at MAX_GEMINI_CALLS (3) total upstream Gemini calls per invocation, so a
+ * single failing request can never fan out across every candidate model/attempt combination (up
+ * to 4 models * 2 attempts = 8 calls, pre-cap) and burn free-tier quota on a response the client
+ * has likely already given up on. Only the first candidate model gets the withSchema:true +
+ * withSchema:false pair; any subsequent fallback model gets a single withSchema:false attempt.
+ * Worst case is therefore 1 structured + 2 chat attempts = structuredAttemptTimeoutMs +
+ * 2 * chatTimeoutMs (see DEFAULT_TIMEOUT_MS in src/api/llmClient.ts, which must exceed this).
+ * SYNC: keep in sync with server.mjs callGemini. */
+export async function callGemini(
+  messages: Array<{ role: string; content: LlmMessageContent }>,
+  responseFormat: unknown,
+  maxTokens: number,
+  temperature: number | undefined,
+  config: GeminiCallConfig,
+  modelId: string = config.defaultModel,
+): Promise<unknown> {
+  const { systemInstruction, contents } = messagesToGemini(messages);
+  const candidateModels = Array.from(
+    new Set([modelId, "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"].filter(Boolean)),
+  );
+  const MAX_GEMINI_CALLS = 3;
+  let callsMade = 0;
+  let lastError: unknown;
+  const genAI = getGeminiClient(config.apiKey);
+
+  for (let modelIndex = 0; modelIndex < candidateModels.length && callsMade < MAX_GEMINI_CALLS; modelIndex++) {
+    const currentModelId = candidateModels[modelIndex];
+    const attempts =
+      responseFormat && modelIndex === 0
+        ? [{ withSchema: true }, { withSchema: false }]
+        : [{ withSchema: false }];
+
+    for (const attempt of attempts) {
+      if (callsMade >= MAX_GEMINI_CALLS) break;
+      callsMade++;
+      try {
+        const generationConfig: Record<string, unknown> = { maxOutputTokens: maxTokens };
+        if (temperature !== undefined) generationConfig.temperature = temperature;
+
+        let requestContents: Content[] = contents;
+        if (attempt.withSchema && responseFormat) {
+          generationConfig.responseMimeType = "application/json";
+          generationConfig.responseSchema = openAiSchemaToGemini(responseFormat);
+        } else if (!attempt.withSchema && responseFormat) {
+          const schema = openAiSchemaToGemini(responseFormat);
+          const schemaPrompt =
+            "The following is a JSON Schema describing the required output shape - it is NOT " +
+            "the output itself. Respond with ONLY a single JSON object that satisfies this " +
+            "schema (real data filled in, no markdown code fences, no commentary, and never " +
+            "the schema itself): " + JSON.stringify(schema);
+          if (requestContents.length === 0) {
+            requestContents = [{ role: "user", parts: [{ text: schemaPrompt }] }];
+          } else {
+            const last = requestContents[requestContents.length - 1];
+            requestContents = [
+              ...requestContents.slice(0, -1),
+              { ...last, parts: [...last.parts, { text: schemaPrompt }] },
+            ];
+          }
+        }
+
+        const model = genAI.getGenerativeModel({
+          model: currentModelId,
+          systemInstruction,
+          generationConfig,
+        });
+
+        const timeoutMs = attempt.withSchema ? config.structuredAttemptTimeoutMs : config.chatTimeoutMs;
+        const result = await withTimeout(
+          model.generateContent({ contents: requestContents }),
+          timeoutMs,
+          "Gemini request",
+        );
+
+        const text = result.response.text();
+        if (!text?.trim()) {
+          const finishReason = result.response.candidates?.[0]?.finishReason;
+          throw new Error(`Empty LLM response (finishReason=${finishReason ?? "unknown"})`);
+        }
+        try {
+          return JSON.parse(text);
+        } catch {
+          return extractJsonBlock(text);
+        }
+      } catch (err) {
+        lastError = err;
+        console.log(`[llm-dev] Gemini (model=${currentModelId}, schema=${attempt.withSchema}) failed:`, err);
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("LLM_UNAVAILABLE");
+}
+
 function createLlmDevPlugin(env: Record<string, string>): Plugin {
   const geminiApiKey = env.GEMINI_API_KEY || "";
   const geminiModel = env.GEMINI_MODEL || "gemini-3.6-flash";
   const geminiPdfModel = env.GEMINI_PDF_MODEL || geminiModel;
+  // With callGemini's 3-call retry budget, worst case per request is 1 structured attempt + 2
+  // chat attempts = structuredAttemptTimeoutMs + 2 * chatTimeoutMs = 20000 + 2*90000 = 200000ms
+  // (~3.3 min) at these defaults - already a reasonable total, so left unchanged.
   const chatTimeoutMs = Number(env.GEMINI_CHAT_TIMEOUT_MS || 90000);
   const structuredAttemptTimeoutMs = Number(env.GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS || 20000);
   const gapAnalysisMaxTokens = Number(env.GEMINI_GAP_ANALYSIS_MAX_TOKENS || 4096);
@@ -880,99 +1004,12 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
   const templateExtractMaxTokens = Number(env.GEMINI_TEMPLATE_EXTRACT_MAX_TOKENS || 4096);
   const contextExtractCharLimit = Number(env.CONTEXT_EXTRACT_CHAR_LIMIT || 8000);
   const pdfExtractMaxTokens = Number(env.GEMINI_PDF_EXTRACT_MAX_TOKENS || 8192);
-
-  function getGeminiClient(): GoogleGenerativeAI {
-    if (!geminiApiKey) throw new Error("LLM_UNAVAILABLE");
-    return new GoogleGenerativeAI(geminiApiKey);
-  }
-
-  function extractJsonBlock(text: string): unknown {
-    const stripped = text.replace(/```json/gi, "```").replace(/```/g, "");
-    const start = stripped.indexOf("{");
-    const end = stripped.lastIndexOf("}");
-    if (start === -1 || end === -1 || end < start) {
-      throw new Error("No JSON object found in response");
-    }
-    return JSON.parse(stripped.slice(start, end + 1));
-  }
-
-  async function callGemini(
-    messages: Array<{ role: string; content: LlmMessageContent }>,
-    responseFormat: unknown,
-    maxTokens: number,
-    temperature?: number,
-    modelId: string = geminiModel,
-  ): Promise<unknown> {
-    const { systemInstruction, contents } = messagesToGemini(messages);
-    const candidateModels = Array.from(
-      new Set([modelId, "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"].filter(Boolean)),
-    );
-    let lastError: unknown;
-    const genAI = getGeminiClient();
-
-    for (const currentModelId of candidateModels) {
-      const attempts = responseFormat
-        ? [{ withSchema: true }, { withSchema: false }]
-        : [{ withSchema: false }];
-
-      for (const attempt of attempts) {
-        try {
-          const generationConfig: Record<string, unknown> = { maxOutputTokens: maxTokens };
-          if (temperature !== undefined) generationConfig.temperature = temperature;
-
-          let requestContents: Content[] = contents;
-          if (attempt.withSchema && responseFormat) {
-            generationConfig.responseMimeType = "application/json";
-            generationConfig.responseSchema = openAiSchemaToGemini(responseFormat);
-          } else if (!attempt.withSchema && responseFormat) {
-            const schema = openAiSchemaToGemini(responseFormat);
-            const schemaPrompt =
-              "The following is a JSON Schema describing the required output shape - it is NOT " +
-              "the output itself. Respond with ONLY a single JSON object that satisfies this " +
-              "schema (real data filled in, no markdown code fences, no commentary, and never " +
-              "the schema itself): " + JSON.stringify(schema);
-            if (requestContents.length === 0) {
-              requestContents = [{ role: "user", parts: [{ text: schemaPrompt }] }];
-            } else {
-              const last = requestContents[requestContents.length - 1];
-              requestContents = [
-                ...requestContents.slice(0, -1),
-                { ...last, parts: [...last.parts, { text: schemaPrompt }] },
-              ];
-            }
-          }
-
-          const model = genAI.getGenerativeModel({
-            model: currentModelId,
-            systemInstruction,
-            generationConfig,
-          });
-
-          const timeoutMs = attempt.withSchema ? structuredAttemptTimeoutMs : chatTimeoutMs;
-          const result = await withTimeout(
-            model.generateContent({ contents: requestContents }),
-            timeoutMs,
-            "Gemini request",
-          );
-
-          const text = result.response.text();
-          if (!text?.trim()) {
-            const finishReason = result.response.candidates?.[0]?.finishReason;
-            throw new Error(`Empty LLM response (finishReason=${finishReason ?? "unknown"})`);
-          }
-          try {
-            return JSON.parse(text);
-          } catch {
-            return extractJsonBlock(text);
-          }
-        } catch (err) {
-          lastError = err;
-          console.log(`[llm-dev] Gemini (model=${currentModelId}, schema=${attempt.withSchema}) failed:`, err);
-        }
-      }
-    }
-    throw lastError instanceof Error ? lastError : new Error("LLM_UNAVAILABLE");
-  }
+  const geminiConfig: GeminiCallConfig = {
+    apiKey: geminiApiKey,
+    defaultModel: geminiModel,
+    chatTimeoutMs,
+    structuredAttemptTimeoutMs,
+  };
 
   async function extractPdfViaMultimodal(base64Pdf: string): Promise<string> {
     const messages: Array<{ role: string; content: LlmMessageContent }> = [
@@ -994,6 +1031,7 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
       pdfExtractSchema(),
       pdfExtractMaxTokens,
       undefined,
+      geminiConfig,
       geminiPdfModel,
     )) as { extractedText?: string };
     return typeof result.extractedText === "string" ? result.extractedText : "";
@@ -1073,6 +1111,8 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
                 ],
                 gapAnalysisSchema(),
                 gapAnalysisMaxTokens,
+                undefined,
+                geminiConfig,
               );
             } else if (isTemplateExtract) {
               const { docType, rawText } = payload;
@@ -1083,6 +1123,8 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
                 ],
                 templateExtractSchema(),
                 templateExtractMaxTokens,
+                undefined,
+                geminiConfig,
               );
             } else {
               const {
@@ -1145,6 +1187,7 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
                 generateSchema((sections as string[] | undefined) ?? []),
                 generateMaxTokens,
                 temperature,
+                geminiConfig,
               );
               // The frontend's GenerateResponse contract expects { sections: {...} }, but
               // generateSchema's JSON schema puts section names at the top level.
