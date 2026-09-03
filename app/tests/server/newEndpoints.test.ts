@@ -9,10 +9,16 @@ import { applyContextExtractBudget, openAiSchemaToGemini, templateExtractSchema 
 // aren't installed in this workspace).
 
 describe("openAiSchemaToGemini", () => {
-  it("unwraps json_schema.schema for Gemini responseSchema", () => {
+  it("unwraps json_schema.schema and strips unsupported fields for Gemini responseSchema", () => {
     const wrapped = templateExtractSchema();
-    const inner = (wrapped as { json_schema: { schema: unknown } }).json_schema.schema;
-    expect(openAiSchemaToGemini(wrapped)).toEqual(inner);
+    const result = openAiSchemaToGemini(wrapped) as Record<string, unknown>;
+    expect(result).toEqual({
+      type: "object",
+      properties: { sections: { type: "array", items: { type: "string" } } },
+      required: ["sections"],
+    });
+    expect(result.additionalProperties).toBeUndefined();
+    expect(result.strict).toBeUndefined();
   });
 
   it("returns undefined when no format is provided", () => {

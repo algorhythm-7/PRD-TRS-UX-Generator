@@ -792,12 +792,43 @@ export function applyContextExtractBudget(
  * would also execute its unconditional startup side effects (app.listen, etc.). Keep this in
  * sync with server.mjs's LLM section when either changes.
  */
+function cleanGeminiSchema(schema: unknown): unknown {
+  if (!schema || typeof schema !== "object" || schema === null) return schema;
+  if (Array.isArray(schema)) return schema.map(cleanGeminiSchema);
+
+  const rawObj = schema as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+
+  if (rawObj.type !== undefined) {
+    result.type = typeof rawObj.type === "string" ? rawObj.type.toLowerCase() : rawObj.type;
+  }
+  if (rawObj.format !== undefined) result.format = rawObj.format;
+  if (rawObj.description !== undefined) result.description = rawObj.description;
+  if (rawObj.nullable !== undefined) result.nullable = rawObj.nullable;
+  if (rawObj.enum !== undefined) result.enum = rawObj.enum;
+  if (rawObj.required !== undefined) result.required = rawObj.required;
+
+  if (rawObj.properties && typeof rawObj.properties === "object" && !Array.isArray(rawObj.properties)) {
+    const cleanedProps: Record<string, unknown> = {};
+    for (const [pKey, pVal] of Object.entries(rawObj.properties as Record<string, unknown>)) {
+      cleanedProps[pKey] = cleanGeminiSchema(pVal);
+    }
+    result.properties = cleanedProps;
+  }
+
+  if (rawObj.items !== undefined) {
+    result.items = cleanGeminiSchema(rawObj.items);
+  }
+
+  return result;
+}
+
 export function openAiSchemaToGemini(responseFormat: unknown): unknown {
   if (!responseFormat) return undefined;
-  return (
+  const rawSchema =
     (responseFormat as { json_schema?: { schema?: unknown } })?.json_schema?.schema ??
-    responseFormat
-  );
+    responseFormat;
+  return cleanGeminiSchema(rawSchema);
 }
 
 function convertContentToParts(content: LlmMessageContent): Part[] {
@@ -840,7 +871,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 
 function createLlmDevPlugin(env: Record<string, string>): Plugin {
   const geminiApiKey = env.GEMINI_API_KEY || "";
-  const geminiModel = env.GEMINI_MODEL || "gemini-2.0-flash";
+  const geminiModel = env.GEMINI_MODEL || "gemini-2.5-flash";
   const geminiPdfModel = env.GEMINI_PDF_MODEL || geminiModel;
   const chatTimeoutMs = Number(env.GEMINI_CHAT_TIMEOUT_MS || 90000);
   const structuredAttemptTimeoutMs = Number(env.GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS || 20000);
@@ -873,63 +904,71 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
     modelId: string = geminiModel,
   ): Promise<unknown> {
     const { systemInstruction, contents } = messagesToGemini(messages);
-    const attempts = responseFormat ? [{ withSchema: true }, { withSchema: false }] : [{ withSchema: false }];
+    const candidateModels = Array.from(
+      new Set([modelId, "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"].filter(Boolean)),
+    );
     let lastError: unknown;
     const genAI = getGeminiClient();
 
-    for (const attempt of attempts) {
-      try {
-        const generationConfig: Record<string, unknown> = { maxOutputTokens: maxTokens };
-        if (temperature !== undefined) generationConfig.temperature = temperature;
+    for (const currentModelId of candidateModels) {
+      const attempts = responseFormat
+        ? [{ withSchema: true }, { withSchema: false }]
+        : [{ withSchema: false }];
 
-        let requestContents: Content[] = contents;
-        if (attempt.withSchema && responseFormat) {
-          generationConfig.responseMimeType = "application/json";
-          generationConfig.responseSchema = openAiSchemaToGemini(responseFormat);
-        } else if (!attempt.withSchema && responseFormat) {
-          const schema = openAiSchemaToGemini(responseFormat);
-          const schemaPrompt =
-            "The following is a JSON Schema describing the required output shape - it is NOT " +
-            "the output itself. Respond with ONLY a single JSON object that satisfies this " +
-            "schema (real data filled in, no markdown code fences, no commentary, and never " +
-            "the schema itself): " + JSON.stringify(schema);
-          if (requestContents.length === 0) {
-            requestContents = [{ role: "user", parts: [{ text: schemaPrompt }] }];
-          } else {
-            const last = requestContents[requestContents.length - 1];
-            requestContents = [
-              ...requestContents.slice(0, -1),
-              { ...last, parts: [...last.parts, { text: schemaPrompt }] },
-            ];
-          }
-        }
-
-        const model = genAI.getGenerativeModel({
-          model: modelId,
-          systemInstruction,
-          generationConfig,
-        });
-
-        const timeoutMs = attempt.withSchema ? structuredAttemptTimeoutMs : chatTimeoutMs;
-        const result = await withTimeout(
-          model.generateContent({ contents: requestContents }),
-          timeoutMs,
-          "Gemini request",
-        );
-
-        const text = result.response.text();
-        if (!text?.trim()) {
-          const finishReason = result.response.candidates?.[0]?.finishReason;
-          throw new Error(`Empty LLM response (finishReason=${finishReason ?? "unknown"})`);
-        }
+      for (const attempt of attempts) {
         try {
-          return JSON.parse(text);
-        } catch {
-          return extractJsonBlock(text);
+          const generationConfig: Record<string, unknown> = { maxOutputTokens: maxTokens };
+          if (temperature !== undefined) generationConfig.temperature = temperature;
+
+          let requestContents: Content[] = contents;
+          if (attempt.withSchema && responseFormat) {
+            generationConfig.responseMimeType = "application/json";
+            generationConfig.responseSchema = openAiSchemaToGemini(responseFormat);
+          } else if (!attempt.withSchema && responseFormat) {
+            const schema = openAiSchemaToGemini(responseFormat);
+            const schemaPrompt =
+              "The following is a JSON Schema describing the required output shape - it is NOT " +
+              "the output itself. Respond with ONLY a single JSON object that satisfies this " +
+              "schema (real data filled in, no markdown code fences, no commentary, and never " +
+              "the schema itself): " + JSON.stringify(schema);
+            if (requestContents.length === 0) {
+              requestContents = [{ role: "user", parts: [{ text: schemaPrompt }] }];
+            } else {
+              const last = requestContents[requestContents.length - 1];
+              requestContents = [
+                ...requestContents.slice(0, -1),
+                { ...last, parts: [...last.parts, { text: schemaPrompt }] },
+              ];
+            }
+          }
+
+          const model = genAI.getGenerativeModel({
+            model: currentModelId,
+            systemInstruction,
+            generationConfig,
+          });
+
+          const timeoutMs = attempt.withSchema ? structuredAttemptTimeoutMs : chatTimeoutMs;
+          const result = await withTimeout(
+            model.generateContent({ contents: requestContents }),
+            timeoutMs,
+            "Gemini request",
+          );
+
+          const text = result.response.text();
+          if (!text?.trim()) {
+            const finishReason = result.response.candidates?.[0]?.finishReason;
+            throw new Error(`Empty LLM response (finishReason=${finishReason ?? "unknown"})`);
+          }
+          try {
+            return JSON.parse(text);
+          } catch {
+            return extractJsonBlock(text);
+          }
+        } catch (err) {
+          lastError = err;
+          console.log(`[llm-dev] Gemini (model=${currentModelId}, schema=${attempt.withSchema}) failed:`, err);
         }
-      } catch (err) {
-        lastError = err;
-        console.log(`[llm-dev] Gemini (schema=${attempt.withSchema}) failed:`, err);
       }
     }
     throw lastError instanceof Error ? lastError : new Error("LLM_UNAVAILABLE");

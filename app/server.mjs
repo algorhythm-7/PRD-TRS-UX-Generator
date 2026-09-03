@@ -28,7 +28,7 @@ const oauthEnabled = Boolean(CLIENT_ID && CLIENT_SECRET);
 // server.mjs (not the rest of app/) into the runtime image, so this cannot live in a
 // separate module. SYNC: keep in sync with vite.config.ts createLlmDevPlugin.
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 const GEMINI_PDF_MODEL = process.env.GEMINI_PDF_MODEL || GEMINI_MODEL;
 const GEMINI_CHAT_TIMEOUT_MS = Number(process.env.GEMINI_CHAT_TIMEOUT_MS || 90000);
 const GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS = Number(
@@ -58,9 +58,40 @@ function extractJsonBlock(text) {
   return JSON.parse(stripped.slice(start, end + 1));
 }
 
+function cleanGeminiSchema(schema) {
+  if (!schema || typeof schema !== "object" || schema === null) return schema;
+  if (Array.isArray(schema)) return schema.map(cleanGeminiSchema);
+
+  const result = {};
+
+  if (schema.type !== undefined) {
+    result.type = typeof schema.type === "string" ? schema.type.toLowerCase() : schema.type;
+  }
+  if (schema.format !== undefined) result.format = schema.format;
+  if (schema.description !== undefined) result.description = schema.description;
+  if (schema.nullable !== undefined) result.nullable = schema.nullable;
+  if (schema.enum !== undefined) result.enum = schema.enum;
+  if (schema.required !== undefined) result.required = schema.required;
+
+  if (schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)) {
+    const cleanedProps = {};
+    for (const [pKey, pVal] of Object.entries(schema.properties)) {
+      cleanedProps[pKey] = cleanGeminiSchema(pVal);
+    }
+    result.properties = cleanedProps;
+  }
+
+  if (schema.items !== undefined) {
+    result.items = cleanGeminiSchema(schema.items);
+  }
+
+  return result;
+}
+
 function openAiSchemaToGemini(responseFormat) {
   if (!responseFormat) return undefined;
-  return responseFormat.json_schema?.schema ?? responseFormat;
+  const rawSchema = responseFormat.json_schema?.schema ?? responseFormat;
+  return cleanGeminiSchema(rawSchema);
 }
 
 function convertContentToParts(content) {
@@ -105,69 +136,76 @@ function withTimeout(promise, timeoutMs, label) {
  * schema embedded in the user message and defensive text parsing. */
 async function callGemini(messages, responseFormat, maxTokens, temperature, modelId = GEMINI_MODEL) {
   const { systemInstruction, contents } = messagesToGemini(messages);
-  const attempts = responseFormat ? [{ withSchema: true }, { withSchema: false }] : [{ withSchema: false }];
+  const candidateModels = Array.from(
+    new Set([modelId, "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"].filter(Boolean)),
+  );
   let lastError;
   const genAI = getGeminiClient();
 
-  for (const attempt of attempts) {
-    try {
-      const generationConfig = { maxOutputTokens: maxTokens };
-      if (temperature !== undefined) generationConfig.temperature = temperature;
+  for (const currentModelId of candidateModels) {
+    const attempts = responseFormat
+      ? [{ withSchema: true }, { withSchema: false }]
+      : [{ withSchema: false }];
 
-      let requestContents = contents;
-      if (attempt.withSchema && responseFormat) {
-        generationConfig.responseMimeType = "application/json";
-        generationConfig.responseSchema = openAiSchemaToGemini(responseFormat);
-      } else if (!attempt.withSchema && responseFormat) {
-        const schema = openAiSchemaToGemini(responseFormat);
-        const schemaPrompt =
-          "The following is a JSON Schema describing the required output shape - it is NOT " +
-          "the output itself. Respond with ONLY a single JSON object that satisfies this " +
-          "schema (real data filled in, no markdown code fences, no commentary, and never " +
-          "the schema itself): " + JSON.stringify(schema);
-        if (requestContents.length === 0) {
-          requestContents = [{ role: "user", parts: [{ text: schemaPrompt }] }];
-        } else {
-          const last = requestContents[requestContents.length - 1];
-          requestContents = [
-            ...requestContents.slice(0, -1),
-            { ...last, parts: [...last.parts, { text: schemaPrompt }] },
-          ];
-        }
-      }
-
-      const model = genAI.getGenerativeModel({
-        model: modelId,
-        systemInstruction,
-        generationConfig,
-      });
-
-      const timeoutMs = attempt.withSchema
-        ? GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS
-        : GEMINI_CHAT_TIMEOUT_MS;
-
-      const result = await withTimeout(
-        model.generateContent({ contents: requestContents }),
-        timeoutMs,
-        "Gemini request",
-      );
-
-      const text = result.response.text();
-      if (!text?.trim()) {
-        const finishReason = result.response.candidates?.[0]?.finishReason;
-        throw new Error(`Empty LLM response (finishReason=${finishReason ?? "unknown"})`);
-      }
+    for (const attempt of attempts) {
       try {
-        return JSON.parse(text);
-      } catch {
-        return extractJsonBlock(text);
+        const generationConfig = { maxOutputTokens: maxTokens };
+        if (temperature !== undefined) generationConfig.temperature = temperature;
+
+        let requestContents = contents;
+        if (attempt.withSchema && responseFormat) {
+          generationConfig.responseMimeType = "application/json";
+          generationConfig.responseSchema = openAiSchemaToGemini(responseFormat);
+        } else if (!attempt.withSchema && responseFormat) {
+          const schema = openAiSchemaToGemini(responseFormat);
+          const schemaPrompt =
+            "The following is a JSON Schema describing the required output shape - it is NOT " +
+            "the output itself. Respond with ONLY a single JSON object that satisfies this " +
+            "schema (real data filled in, no markdown code fences, no commentary, and never " +
+            "the schema itself): " + JSON.stringify(schema);
+          if (requestContents.length === 0) {
+            requestContents = [{ role: "user", parts: [{ text: schemaPrompt }] }];
+          } else {
+            const last = requestContents[requestContents.length - 1];
+            requestContents = [
+              ...requestContents.slice(0, -1),
+              { ...last, parts: [...last.parts, { text: schemaPrompt }] },
+            ];
+          }
+        }
+
+        const model = genAI.getGenerativeModel({
+          model: currentModelId,
+          systemInstruction,
+          generationConfig,
+        });
+
+        const timeoutMs = attempt.withSchema
+          ? GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS
+          : GEMINI_CHAT_TIMEOUT_MS;
+        const result = await withTimeout(
+          model.generateContent({ contents: requestContents }),
+          timeoutMs,
+          "Gemini request",
+        );
+
+        const text = result.response.text();
+        if (!text?.trim()) {
+          const finishReason = result.response.candidates?.[0]?.finishReason;
+          throw new Error(`Empty LLM response (finishReason=${finishReason ?? "unknown"})`);
+        }
+        try {
+          return JSON.parse(text);
+        } catch {
+          return extractJsonBlock(text);
+        }
+      } catch (err) {
+        lastError = err;
+        console.log(`[llm-dev] Gemini (model=${currentModelId}, schema=${attempt.withSchema}) failed:`, err);
       }
-    } catch (err) {
-      lastError = err;
-      log("gemini", `(schema=${attempt.withSchema}) failed: ${err.message}`);
     }
   }
-  throw lastError ?? new LlmUnavailableError("callGemini failed");
+  throw lastError instanceof Error ? lastError : new Error("LLM_UNAVAILABLE");
 }
 
 function gapAnalysisSchema() {
