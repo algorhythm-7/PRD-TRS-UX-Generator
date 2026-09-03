@@ -127,9 +127,9 @@ The app **still runs** — `npm run dev` serves the UI — but AI features are d
 | Setting | Recommended value | Notes |
 |---------|-------------------|-------|
 | `GEMINI_API_KEY` | From [Google AI Studio](https://aistudio.google.com/apikey) | Free tier; rate limits apply |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Fast, cheap, good JSON behavior; fallback: `gemini-1.5-flash` |
-| `GEMINI_PDF_MODEL` | Same as `GEMINI_MODEL` or `gemini-2.0-flash` | For PDF multimodal extraction |
-| Timeouts | 90s chat / 120s generate | Shorter than Cluster’s 115s race — update `llmClient.ts` `DEFAULT_TIMEOUT_MS` to ~100000 if needed |
+| `GEMINI_MODEL` | `gemini-3.6-flash` | Fast, cheap, good JSON behavior; free tier available (use `gemini-3.5-flash-lite` for lighter/cheaper option) |
+| `GEMINI_PDF_MODEL` | Same as `GEMINI_MODEL` or `gemini-3.5-flash` | For PDF multimodal extraction |
+| Timeouts | 90s chat / 20s structured | Per retry budget in callGemini; 1 structured + 2 chat = max ~200s total per request |
 
 ### 4.3 API mapping: Cluster → Gemini
 

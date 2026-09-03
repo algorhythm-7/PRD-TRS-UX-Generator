@@ -879,8 +879,10 @@ export interface GeminiCallConfig {
   structuredAttemptTimeoutMs: number;
 }
 
+class LlmUnavailableError extends Error {}
+
 function getGeminiClient(apiKey: string): GoogleGenAI {
-  if (!apiKey) throw new Error("LLM_UNAVAILABLE");
+  if (!apiKey) throw new LlmUnavailableError("GEMINI_API_KEY not set");
   return new GoogleGenAI({ apiKey });
 }
 
@@ -989,9 +991,9 @@ export async function callGemini(
 }
 
 function createLlmDevPlugin(env: Record<string, string>): Plugin {
-  const geminiApiKey = env.GEMINI_API_KEY || "";
-  const geminiModel = env.GEMINI_MODEL || "gemini-3.6-flash";
-  const geminiPdfModel = env.GEMINI_PDF_MODEL || geminiModel;
+  const geminiApiKey = (env.GEMINI_API_KEY || "").trim();
+  const geminiModel = (env.GEMINI_MODEL || "gemini-3.6-flash").trim();
+  const geminiPdfModel = (env.GEMINI_PDF_MODEL || geminiModel).trim();
   // With callGemini's 3-call retry budget, worst case per request is 1 structured attempt + 2
   // chat attempts = structuredAttemptTimeoutMs + 2 * chatTimeoutMs = 20000 + 2*90000 = 200000ms
   // (~3.3 min) at these defaults - already a reasonable total, so left unchanged.
@@ -1039,8 +1041,8 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
     name: "llm-dev",
     configureServer(server) {
       console.log(
-        `[llm-dev] Gemini enabled - model: ${geminiModel}` +
-        (geminiApiKey ? "" : " (GEMINI_API_KEY not set)"),
+        `[llm-dev] Gemini enabled with resolved model: ${geminiModel} (pdf: ${geminiPdfModel})` +
+        (geminiApiKey ? "" : " — WARNING: GEMINI_API_KEY not set"),
       );
 
       server.middlewares.use((req: IncomingMessage, res: ServerResponse, next: (err?: unknown) => void) => {

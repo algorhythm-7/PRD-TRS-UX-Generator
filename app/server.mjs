@@ -27,9 +27,9 @@ const oauthEnabled = Boolean(CLIENT_ID && CLIENT_SECRET);
 // Self-contained in this file on purpose: the production Docker build only copies
 // server.mjs (not the rest of app/) into the runtime image, so this cannot live in a
 // separate module. SYNC: keep in sync with vite.config.ts createLlmDevPlugin.
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
-const GEMINI_PDF_MODEL = process.env.GEMINI_PDF_MODEL || GEMINI_MODEL;
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim();
+const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-3.6-flash").trim();
+const GEMINI_PDF_MODEL = (process.env.GEMINI_PDF_MODEL || GEMINI_MODEL).trim();
 // With callGemini's 3-call retry budget, worst case per request is 1 structured attempt + 2 chat
 // attempts = GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS + 2 * GEMINI_CHAT_TIMEOUT_MS = 20000 + 2*90000
 // = 200000ms (~3.3 min) at these defaults - already a reasonable total, so left unchanged.
@@ -1204,7 +1204,7 @@ if (envConfigResolved) {
 }
 
 if (GEMINI_API_KEY) {
-  log("llm", `Gemini enabled - model: ${GEMINI_MODEL}, pdf model: ${GEMINI_PDF_MODEL}`);
+  log("llm", `Gemini enabled with resolved model: ${GEMINI_MODEL} (pdf: ${GEMINI_PDF_MODEL})`);
 } else {
   log("llm", "WARNING: GEMINI_API_KEY not set - LLM path will be unavailable");
 }
