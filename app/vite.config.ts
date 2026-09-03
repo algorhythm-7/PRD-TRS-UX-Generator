@@ -871,7 +871,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 
 function createLlmDevPlugin(env: Record<string, string>): Plugin {
   const geminiApiKey = env.GEMINI_API_KEY || "";
-  const geminiModel = env.GEMINI_MODEL || "gemini-2.5-flash";
+  const geminiModel = env.GEMINI_MODEL || "gemini-3.6-flash";
   const geminiPdfModel = env.GEMINI_PDF_MODEL || geminiModel;
   const chatTimeoutMs = Number(env.GEMINI_CHAT_TIMEOUT_MS || 90000);
   const structuredAttemptTimeoutMs = Number(env.GEMINI_STRUCTURED_ATTEMPT_TIMEOUT_MS || 20000);
@@ -905,7 +905,7 @@ function createLlmDevPlugin(env: Record<string, string>): Plugin {
   ): Promise<unknown> {
     const { systemInstruction, contents } = messagesToGemini(messages);
     const candidateModels = Array.from(
-      new Set([modelId, "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"].filter(Boolean)),
+      new Set([modelId, "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"].filter(Boolean)),
     );
     let lastError: unknown;
     const genAI = getGeminiClient();
